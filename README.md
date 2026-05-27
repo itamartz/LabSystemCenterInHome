@@ -1,13 +1,11 @@
 # LabSystemCenterInHome
 
-A local, **physical-hardware** rebuild of a Microsoft **System Center (SCCM/Configuration
-Manager + SCOM)** lab — the on-prem mirror of an Azure-hosted version
-(`LabSystemCenterInAzure`). Where the Azure version provisions everything with Terraform on
-nested Hyper-V VMs, this version stands the **same topology** up on physical mini-PC
-Hyper-V hosts, driven entirely by **PowerShell over WinRM** from a workstation.
+A Microsoft **System Center (SCCM/Configuration Manager + SCOM)** lab built on **physical
+mini-PC Hyper-V hosts**, provisioned and configured end-to-end by **PowerShell over WinRM**
+from a workstation. Guest VMs run **directly on Hyper-V** (no nesting), isolated on a NAT
+vSwitch with outbound internet for Windows Update / installers.
 
-> **Domain:** `sadab.pri` (NetBIOS `SADAB`) · **Site code:** `PR1` · kept identical to the
-> Azure version so the post-deploy scripts run unmodified.
+> **Domain:** `sadab.pri` (NetBIOS `SADAB`) · **Site code:** `PR1`
 
 Everything that *can* be configured declaratively is **DSC-backed** (the `ConfigMgrCBDsc`
 module, `Test` → `Set`, idempotent). The few operations with no DSC resource are
@@ -35,32 +33,25 @@ Site B / SQL Always-On / SCOM has not been acquired yet, so those pieces are def
 | Service Connection Point (Online) | ✅ on `A-SCCM` |
 | In-console site update **KB36949461** (2509 Hotfix Rollup) | ✅ installed |
 | Client **PKI / HTTPS** communication (agent uses a client cert) | ✅ verified on a client |
-| Site B · SQL Always-On · SCOM | ⏸️ deferred (needs Host B) |
+| Site B · SQL Always-On · SCOM | ⏸️ deferred (needs a second host) |
 
 ---
 
 ## Architecture
 
-This is the on-prem counterpart of the Azure lab; the guest topology is identical, only the
-plumbing differs.
+The lab runs on physical mini-PC hosts with a deliberately simple, isolated topology:
 
-| Concern | Azure version | This (local) version |
-|---|---|---|
-| Provisioning | Terraform → Azure VMs → CSE bootstrap | Manual / scripted on existing Hyper-V hosts |
-| Hosts | 2× nested-virt Azure VMs | 2× physical mini-PCs (NUC-class) |
-| VM placement | Nested inside Azure host VMs | **Direct on Hyper-V** (no nesting) |
-| Networking | Azure VNets + peering + Bastion | Hyper-V **NAT vSwitch named `Lab`** per host (Site A = 10.10.0.0/24, Site B = 10.20.0.0/24); inter-site peering simulated by host route |
-| Internet for VMs | None (SMB media share) | NAT switch gives VMs internet for Windows Update / installers |
-| Remote access | Tailscale subnet routing | Direct **WinRM over LAN** |
-| Cost controls | Auto-shutdown timers / runbooks | Not needed (no per-minute billing) |
-
-**Key design decisions**
-- **No nested virtualization** — VMs run directly on the physical host.
-- **NAT vSwitch** isolates VMs on `10.10.0.0/24` (Site A) / `10.20.0.0/24` (Site B) while
-  giving them outbound internet.
-- **Domain & paths unchanged** (`sadab.pri`, `C:\HyperV-Lab\`) so the Azure post-deploy
-  scripts are reused as-is.
-- **PowerShell 5.1 only** in anything that runs on the hosts/VMs (WS2025 default).
+- **No nested virtualization** — VMs run directly on the physical Hyper-V host.
+- **NAT vSwitch named `Lab`** on each host — Site A VMs sit on `10.10.0.0/24`, Site B on
+  `10.20.0.0/24`, each host doing NAT so the VMs get outbound internet while staying
+  isolated. A host route simulates inter-site connectivity.
+- **Remote management via WinRM over the LAN** — no provisioning agent on the host beyond
+  WinRM; everything is driven from a workstation with PowerShell (Hyper-V PowerShell Direct
+  into the guests, network WinRM to the host).
+- **PowerShell 5.1 only** in anything that runs on the hosts/VMs (Windows Server 2025
+  default), so the scripts stay portable across the hosts.
+- Stable **domain and paths** (`sadab.pri`, `C:\HyperV-Lab\`) keep the per-VM and post-deploy
+  scripts reusable across rebuilds.
 
 ---
 
@@ -81,8 +72,8 @@ plumbing differs.
 
 ## VM inventory
 
-Same names/IPs as the Azure version. **Phase 1** = built now; **Deferred** = scripts exist
-but not deployed (needs Host B or a RAM upgrade).
+**Phase 1** = built now; **Deferred** = scripts exist but not deployed (needs a second host
+or a RAM upgrade).
 
 | VM | IP | Site | Role | RAM | Phase |
 |---|---|---|---|---|---|
@@ -242,9 +233,9 @@ Invoke-LabHost {
 
 ## Roadmap
 
-- **Phase 2 (needs Host B / 64 GB RAM):** Site B VMs, SQL Server Always-On Availability
-  Group, passive SCCM site server, DFSR replication across sites, and SCOM (management server
-  + SQL + SCCM management-pack import).
+- **Phase 2 (needs a second host / 64 GB RAM):** Site B VMs, SQL Server Always-On
+  Availability Group, passive SCCM site server, DFSR replication across sites, and SCOM
+  (management server + SQL + SCCM management-pack import).
 - A RAM upgrade to **64 GB** (2× 32 GB DDR5-5600 SODIMM) on Host A would allow the full
   Phase-2 footprint without aggressive ballooning.
 

@@ -40,7 +40,7 @@ After this, `scripts\lib\Connect-LabHost.ps1` exposes `Invoke-LabHost { ... }` w
 
 ## 2. Configure the Hyper-V host
 
-Sets up storage paths, the `Lab` Internal vSwitch (10.10.0.0/24), NAT, firewall rules, and the **Tailscale route override** (only needed while the Azure lab is still up and advertising overlapping subnets).
+Sets up storage paths, the `Lab` Internal vSwitch (10.10.0.0/24), NAT, firewall rules, and the **Tailscale route override** (only needed if a Tailscale node on the network advertises an overlapping `10.10.0.0/24` subnet).
 
 ```powershell
 . .\scripts\lib\Connect-LabHost.ps1
@@ -114,9 +114,9 @@ Remove-PSSession $sess
 
 The `Files\<Tool>\Install-Silent.ps1` wrappers are versioned in the repo; the actual binaries are not. You need to stage them on the host. Options:
 
-- **Option A — Re-use the Azure project's already-downloaded copy** (if you have one):
+- **Option A — Re-use an already-downloaded local media copy** (if you have one):
   ```powershell
-  $src = 'C:\path\to\LabSystemCenterInAzure\Files'
+  $src = 'C:\path\to\media\Files'
   $sess = New-PSSession -ComputerName 100.100.71.55 -Credential (Import-Clixml .\.secrets\hyperv-host.cred.xml) -Authentication Negotiate
   $dirs = 'ADK','ADKPE','ODBC18','ReportBuilder','SCCM','SQL','SQLCLRTypes','SQLNCLI','SSMS','SSRS','SxS','VCRedist','WebView2'
   foreach ($d in $dirs) {

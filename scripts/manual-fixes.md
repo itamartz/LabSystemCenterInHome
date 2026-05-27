@@ -2,8 +2,8 @@
 
 Commands run manually to fix issues not yet captured in scripts.
 
-> Entries dated **2026-04-xx** are from the original Azure lab build (carried over with the project copy).
-> Entries dated **2026-05-23** are from the local Hyper-V (NUCBOX_K12) build.
+> Entries dated **2026-04-xx** are carried over from an earlier build of this lab.
+> Entries dated **2026-05-23** onward are from the current Hyper-V (NUCBOX_K12) build.
 
 ---
 
@@ -22,9 +22,9 @@ Invoke-Command -ComputerName 10.10.0.2 -Credential $cred -Authentication Negotia
 ```
 This is now baked into `scripts/post-deploy/LabHelpers.psm1`'s `Invoke-LabRemote` (adds the prefix if the username has no `\` or `@`).
 
-### 2. Tailscale subnet-route collision with Azure lab
+### 2. Tailscale subnet-route collision
 
-**Why:** The Azure lab also uses `10.10.0.0/24` and advertises it through Tailscale subnet routing. On the local host (also a Tailscale node), the kernel installed two routes for `10.10.0.0/24`:
+**Why:** a Tailscale node on the network also advertises `10.10.0.0/24` through Tailscale subnet routing. On the host (also a Tailscale node), the kernel installed two routes for `10.10.0.0/24`:
 - `vEthernet (Lab)` direct, metric 256
 - `Tailscale` via `100.100.100.100`, metric 0
 
@@ -42,7 +42,7 @@ if (-not (Get-NetRoute -DestinationPrefix '10.10.0.0/24' -InterfaceIndex $idx -E
 Get-NetRoute -DestinationPrefix '10.10.0.0/24' -InterfaceAlias 'Tailscale' -ErrorAction SilentlyContinue |
     Set-NetRoute -RouteMetric 9000
 ```
-Temporary: once the Azure lab is decommissioned, the Tailscale advertisement vanishes and this override becomes unnecessary.
+Temporary: once that overlapping Tailscale advertisement is removed, this override becomes unnecessary.
 
 ### 3. WS2025 Eval edition shutdown timer — DISM /Set-Edition needed
 
@@ -64,7 +64,7 @@ Temporary: once the Azure lab is decommissioned, the Tailscale advertisement van
 
 ### 5. IPv6 `DisabledComponents=0xFF` breaks IPv4 service binding on WS2025
 
-**Why:** The Azure unattend had a `reg add ... DisabledComponents /d 255` (= disable all IPv6) FirstLogonCommand. On WS2025 this leaves `LanmanServer` and WinRM bound only to `[::]` in IPv6-only mode, killing all IPv4 TCP listeners.
+**Why:** an earlier unattend had a `reg add ... DisabledComponents /d 255` (= disable all IPv6) FirstLogonCommand. On WS2025 this leaves `LanmanServer` and WinRM bound only to `[::]` in IPv6-only mode, killing all IPv4 TCP listeners.
 
 **Symptom:** `Test-NetConnection -Port 5985` from host returns False, `Get-NetTCPConnection -State Listen` inside the VM shows port 5985 only on `::` (not `0.0.0.0`).
 
@@ -217,7 +217,7 @@ Every failure taught us something; all fixes are in `08-Install-SCCM-Primary.ps1
 
 6. **MSOLEDBSQL19 install 1603 — needs VC++ x86** — `msoledbsql.msi` has a `VCRedistX86Check` custom action. We'd only installed `vc_redist.x64.exe`. Also install `vc_redist.x86.exe`.
 
-7. **LCID 3072 (en-IL) kills SQL CLR — and it's the SQL SERVICE ACCOUNT's locale.** Same error as Azure 2026-04-06 (`spSetupLanternDocuments_CLR` → "LCID 3072 is not supported"), but the Azure fix (`HKU\S-1-5-18`) did NOT work because **our SQL runs as gMSA `SADAB\A-gMSA$`, not LocalSystem.** The 3072 lives in the gMSA's own loaded hive: `HKEY_USERS\<gMSA-SID>\Control Panel\International\Locale = 00000C00`. Fix: resolve `Win32_Service.StartName` → SID, set that hive to `Locale=00000409 / en-US`, restart MSSQLSERVER. **Root cause is unattend `UserLocale=en-IL`** — now changed to `en-US` in `LabVMHelpers.ps1` (TimeZone stays Israel; only the locale/LCID breaks CLR).
+7. **LCID 3072 (en-IL) kills SQL CLR — and it's the SQL SERVICE ACCOUNT's locale.** Same error seen on the 2026-04-06 build (`spSetupLanternDocuments_CLR` → "LCID 3072 is not supported"); the earlier `HKU\S-1-5-18` fix did NOT work here because **our SQL runs as gMSA `SADAB\A-gMSA$`, not LocalSystem.** The 3072 lives in the gMSA's own loaded hive: `HKEY_USERS\<gMSA-SID>\Control Panel\International\Locale = 00000C00`. Fix: resolve `Win32_Service.StartName` → SID, set that hive to `Locale=00000409 / en-US`, restart MSSQLSERVER. **Root cause is unattend `UserLocale=en-IL`** — now changed to `en-US` in `LabVMHelpers.ps1` (TimeZone stays Israel; only the locale/LCID breaks CLR).
 
 8. **Partial-install cleanup between retries** — setup won't reuse a partial `CM_PR1`. Between retries: drop `CM_PR1` on A-SQLSCCM; delete `C:\Program Files\Microsoft Configuration Manager` + `HKLM:\SOFTWARE\Microsoft\SMS` on A-SCCM. Claude's tools block deleting `C:\Program*` paths via a safety hook — use `[System.IO.Directory]::Delete($path,$true)` inside the remote session, not `Remove-Item`.
 

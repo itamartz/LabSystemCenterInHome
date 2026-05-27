@@ -217,9 +217,9 @@ function Set-LabNat {
 
 # -------------------------------------------------------------------
 # Step 7a — Route override: beat the Tailscale subnet route for our lab subnet
-# (the Azure lab advertises the same 10.10.0.0/24 via Tailscale and otherwise wins
+# (if a Tailscale node on the network advertises the same 10.10.0.0/24 it otherwise wins
 # the routing decision, making host->VM traffic disappear into Tailscale).
-# This is temporary — once the Azure lab is decommissioned the conflict is gone.
+# Only relevant while such an overlapping advertisement exists.
 # -------------------------------------------------------------------
 function Set-LabRouteOverride {
     Write-LabLog "Step 7a: Route override so vEthernet ($SwitchName) beats Tailscale for $SubnetCidr" -Level STEP

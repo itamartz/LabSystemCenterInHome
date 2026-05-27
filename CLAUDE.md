@@ -4,7 +4,7 @@ This file guides Claude Code when working with this repository.
 
 ## Project Overview
 
-Local-hardware mirror of the **SCCM + SCOM 2-site lab** originally built in Azure (`..\LabSystemCenterInAzure\`). The Azure version provisions 2x 128 GB Hyper-V hosts via Terraform; this version runs the same lab topology on physical Hyper-V hardware you own.
+A 2-site **SCCM + SCOM lab** running on physical Hyper-V hardware you own, provisioned and configured end-to-end by PowerShell over WinRM.
 
 **Status:** **Phase 1 SCCM Primary is INSTALLED and running on Host A (2026-05-23).** All 5 Site A VMs created, converted to Datacenter, domain-joined to sadab.pri. SQL 2019 + CU32 on A-SQLSCCM. SCCM Primary site **PR1** (version 5.00.9141.1000) installed on A-SCCM — SMS_EXECUTIVE + SMS_SITE_COMPONENT_MANAGER running, SMS Provider responds. **MP + DP now installed on A-MPDP (2026-05-24)** — the SCCM agent is pushed to all 4 discovered Site A servers (A-SCCM, A-SQLSCCM, A-MPDP, A-DFSR; all healthy/active), an `All Servers` device collection exists, and 7-Zip + Notepad++ are deployed as Required and verified installed (see "SCCM Client Management..." below). Host #2 not yet acquired — Site B, SCOM, SQL AG, DFSR deferred.
 
@@ -12,7 +12,7 @@ Remaining Phase 1 (optional): step 12 (DFSR). Phase 2 (needs Host B): SQL AG, pa
 
 **Rebuild from scratch:** See `DEPLOY.md` for the sequential procedure. Every gotcha hit during the build is captured in `scripts/manual-fixes.md`.
 
-**Domain:** `sadab.pri` (NetBIOS: `SADAB`) — kept identical to Azure version so the post-deploy scripts work unmodified.
+**Domain:** `sadab.pri` (NetBIOS: `SADAB`) — stable domain/site naming keeps the post-deploy scripts reusable across rebuilds.
 
 ## Current Hardware
 
@@ -33,22 +33,21 @@ Remaining Phase 1 (optional): step 12 (DFSR). Phase 2 (needs Host B): SQL AG, pa
 
 Effective lab budget on Host A: `28.8 GB physical - ~3 GB OS - 4 GB Jarvis - [4 GB hermes if running] = 14-18 GB`.
 
-## Architecture Differences from the Azure Version
+## Architecture
 
-| Concern | Azure version | This (local) version |
-|---|---|---|
-| Provisioning | Terraform → Azure VMs → CSE → Bootstrap | Manual / scripted on existing Hyper-V host |
-| Host VMs | 2x Standard_E16s_v4 nested-virt VMs | 2x physical mini-PCs (NUC-class) |
-| VM placement | Nested inside Azure host VMs | **Direct on Hyper-V host** (no nesting) |
-| Networking | VNets 10.10/10.20 with peering, Bastion | Hyper-V NAT vSwitch named `Lab` on each host — Host A's `Lab` is 10.10.0.0/24, Host B's `Lab` is 10.20.0.0/24, peering simulated via host route |
-| Remote access | Tailscale subnet routing | Direct WinRM over LAN (host is on `100.100.71.0/24`) |
-| Internet for VMs | None (media shared via SMB from host) | NAT switch gives VMs internet for Windows Update / installers |
-| Auto-shutdown | 4h timer + Azure Automation runbook (cost) | Not needed (no per-minute billing) |
-| Cost tools | `Start-Lab.ps1` / `Stop-Lab.ps1` via `az` CLI | Local `Start-VM` / `Stop-VM` wrappers |
+| Concern | This lab |
+|---|---|
+| Provisioning | Manual / scripted on existing Hyper-V hosts (PowerShell over WinRM) |
+| Hosts | 2x physical mini-PCs (NUC-class) |
+| VM placement | **Direct on Hyper-V host** (no nesting) |
+| Networking | Hyper-V NAT vSwitch named `Lab` on each host — Host A's `Lab` is 10.10.0.0/24, Host B's `Lab` is 10.20.0.0/24, peering simulated via host route |
+| Remote access | Direct WinRM over LAN (host is on `100.100.71.0/24`) |
+| Internet for VMs | NAT switch gives VMs internet for Windows Update / installers |
+| Lifecycle | Local `Start-VM` / `Stop-VM` wrappers (no per-minute billing, no auto-shutdown needed) |
 
 ## VM Inventory
 
-Same names and IPs as the Azure version — keeps scripts unmodified. `Phase 1` = build now. `Deferred` = scripts exist (in `scripts\vms\`) but not deployed yet; add when Host A RAM is upgraded.
+`Phase 1` = build now. `Deferred` = scripts exist (in `scripts\vms\`) but not deployed yet; add when Host A RAM is upgraded.
 
 | VM | IP | Site | Role | RAM | vCPU | Phase |
 |---|---|---|---|---|---|---|
@@ -150,11 +149,10 @@ LabSystemCenterInHome\
 ├── scripts\
 │   ├── lib\
 │   │   └── Connect-LabHost.ps1        # cred-load + Invoke-Command helper
-│   ├── post-deploy\                   # 14-step orchestrated post-VM-creation (reused as-is from Azure)
-│   ├── vms\                           # Per-VM creation + post-config (LabVMHelpers.ps1 reused as-is)
+│   ├── post-deploy\                   # 14-step orchestrated post-VM-creation + Configure-*/Deploy-*/Install-*
+│   ├── vms\                           # Per-VM creation + post-config (LabVMHelpers.ps1)
 │   ├── sccm-roles\                    # MP / DP / SUP role configuration
-│   ├── Bootstrap-HostA.ps1            # REWRITE NEEDED — strip Azure CSE scaffolding
-│   ├── Bootstrap-HostB.ps1            # REWRITE NEEDED — strip Azure CSE scaffolding
+│   ├── setup\Configure-Host.ps1       # one-shot host prep (vSwitch, paths, firewall)
 │   ├── Download-LabFiles.ps1          # Download WS2025 VHDX + SCCM/SCOM/SQL/ADK media
 │   ├── Download-SCCMPrereqs.ps1       # Download SCCM prereq installers
 │   └── manual-fixes.md                # Log of one-off manual commands run on hosts
@@ -163,11 +161,9 @@ LabSystemCenterInHome\
     └── SQL\... (etc., 11 dirs)
 ```
 
-The original Azure project lives at `..\LabSystemCenterInAzure\` — check it directly for `LAB-PLAN.md`, `terraform\`, `Bootstrap-Host*.ps1` originals, or any asset not copied here.
+## Script Inventory
 
-## Reusable Assets from the Azure Version
-
-**Reused as-is (host-agnostic, runs inside guest VMs):**
+**Host-agnostic (runs inside guest VMs):**
 - All `scripts\post-deploy\01-14*.ps1` — orchestrated post-VM-creation deploy (DC promotion → SQL AG → SCCM → SCOM)
 - `scripts\post-deploy\Invoke-LabDeploy.ps1` + `LabHelpers.psm1`
 - `scripts\vms\Post-*.ps1` — per-VM post-config inside the guest
@@ -176,15 +172,9 @@ The original Azure project lives at `..\LabSystemCenterInAzure\` — check it di
 - `scripts\sccm-roles\*.ps1` — MP/DP/SUP role config
 - `Files\*\Install-Silent.ps1` — silent installers
 
-**Needs rewriting:**
-- `scripts\Bootstrap-HostA.ps1` / `Bootstrap-HostB.ps1` — strip Azure CSE scheduled-task reboot survival; strip Tailscale install; the vSwitch + parent VHDX + diff disk + unattend + VM creation logic still applies but should run on local Hyper-V directly. Plan: rewrite as `scripts\setup\Configure-Host.ps1` (one-shot, idempotent, runs against a known host via WinRM).
-- `Start-Lab.ps1` / `Stop-Lab.ps1` — replace `az vm start/deallocate` with local `Get-VM | Start-VM` / `Stop-VM`.
-
-**Dropped (Azure-specific, not needed):**
-- `terraform\` — no Azure infra
-- `mcp\Start-LabMCPServer.ps1` — Tailscale-bound; not needed on LAN (direct WinRM works)
-- `scripts\Ensure-Tailscale.ps1`, `scripts\Start-ShutdownTimer.ps1`
-- `tools\LabShutdown\`, `tools\PSAppDeployToolkit\` — shutdown UI
+**Host preparation:**
+- `scripts\setup\Configure-Host.ps1` — one-shot, idempotent host prep (the `Lab` NAT vSwitch + parent VHDX + diff disk + unattend + VM creation prerequisites), run against a host via WinRM. (`scripts\Bootstrap-Host*.ps1` are earlier host-bootstrap drafts kept for reference.)
+- VM lifecycle is handled with local `Get-VM | Start-VM` / `Stop-VM` (sequential boot, smallest→largest).
 
 ## Connection / Remote Access
 
@@ -199,13 +189,13 @@ Host A (`NUCBOX_K12` at `100.100.71.55`) is reachable via WinRM over LAN. Local-
 Invoke-LabHost { Get-VM | Select-Object Name, State }
 ```
 
-For nested-VM access from the host, use Hyper-V direct connect (`Invoke-Command -VMName`) — same pattern as the Azure version. The helper exposes `Invoke-LabVM -VMName 'A-DC' -ScriptBlock { ... }` once VMs exist.
+For guest-VM access from the host, use Hyper-V direct connect (`Invoke-Command -VMName`). The helper exposes `Invoke-LabVM -VMName 'A-DC' -ScriptBlock { ... }` once VMs exist.
 
 ## Key Design Decisions
 
-- **No nested virtualization** — VMs run directly on the physical Hyper-V host. The Azure version only nested because the "host" was itself an Azure VM.
-- **NAT vSwitch for VM isolation** — VMs sit on 10.10.0.0/24 (Site A) and 10.20.0.0/24 (Site B), with the host doing NAT to give them internet. Mirrors Azure VNet isolation without the SMB media-share complexity.
-- **Domain/path names unchanged** — `sadab.pri`, `C:\HyperV-Lab\` retained for script reuse. **vSwitch renamed** from Azure's `Lab-Internal-SiteA/B` to single name `Lab` on each host (each host's `Lab` is its own subnet's NAT). The per-VM `New-*.ps1` scripts were updated accordingly.
+- **No nested virtualization** — VMs run directly on the physical Hyper-V host.
+- **NAT vSwitch for VM isolation** — VMs sit on 10.10.0.0/24 (Site A) and 10.20.0.0/24 (Site B), with the host doing NAT to give them internet — isolation plus outbound access without an SMB media-share dependency.
+- **Stable domain/path names** — `sadab.pri`, `C:\HyperV-Lab\` keep scripts reusable. The NAT vSwitch is named `Lab` on each host (each host's `Lab` is its own subnet's NAT); the per-VM `New-*.ps1` scripts reference that name.
 - **Plan now, build later** — design is locked; building begins when Host B arrives (target ~32 GB). Until then we can validate parts on Host A (e.g., parent VHDX download, vSwitch creation, A-DC alone).
 - **Cred storage** — project-local `.secrets\*.cred.xml`, DPAPI-encrypted, per-user/per-machine. Dropbox sync of the file is harmless (can't decrypt elsewhere).
 - **PowerShell 5.1 only** — no PS7 syntax in scripts that target Host A (Win11 default is 5.1). Use `Bash` tool / `pwsh` only when explicitly on PS7.
@@ -233,7 +223,7 @@ Discoveries while standing up Phase 1 — encoded in scripts already, kept here 
 - **Eval edition shutdown:** WS2025 Eval reboots every hour after the eval expires. Conversion to Datacenter via `DISM /Online /Set-Edition:ServerDatacenter /ProductKey:D764K-2NDRG-47T6Q-P8T8W-YP6DF /AcceptEula` (KMS client setup key from Microsoft Learn) escapes this. The conversion needs a reboot to finalize. After the reboot, **Windows re-enables the firewall** as part of the security baseline — `Convert-LabVMEdition` re-disables it.
 - **DISM in unattend FirstLogonCommands is unreliable on WS2025.** The chain processes Orders 1-7 (enough to enable WinRM) but stalls before reaching slow commands. **Solution:** do the heavy lifting via Hyper-V direct WinRM after boot. See `Convert-LabVMEdition` + `Wait-LabVMRemoting` in `LabVMHelpers.ps1`.
 - **Don't disable IPv6 in the unattend.** `DisabledComponents=255` on WS2025 leaves services bound to `[::]` in IPv6-only mode, killing TCP listeners for SMB/WinRM on IPv4. The unattend has this command removed (Order 9).
-- **Tailscale subnet-route collision:** The Azure lab advertises `10.10.0.0/24` via Tailscale, and on the local host this wins over `vEthernet (Lab)` (`RouteMetric 0` < `256`). Host-to-VM traffic disappears into Tailscale. **Fix** (now part of `Configure-Host.ps1` step 7a): drop `vEthernet (Lab)` `InterfaceMetric` to 1 and raise the Tailscale 10.10.0.0/24 route's `RouteMetric` to 9000. Goes away once Azure lab is decommissioned.
+- **Tailscale subnet-route collision:** if a Tailscale node on the network advertises `10.10.0.0/24`, on the host that route can win over `vEthernet (Lab)` (`RouteMetric 0` < `256`) and host-to-VM traffic disappears into Tailscale. **Fix** (part of `Configure-Host.ps1` step 7a): drop `vEthernet (Lab)` `InterfaceMetric` to 1 and raise the conflicting Tailscale 10.10.0.0/24 route's `RouteMetric` to 9000. Only relevant while such an overlapping advertisement exists.
 - **A-SCCM needs lower StartupBytes than MaximumBytes.** Hyper-V allocates the full `StartupBytes` at boot — it doesn't pre-emptively balloon other VMs. On a 28.8 GB host with Jarvis (4 GB), 4 idle Site A VMs and SQL holding ~8 GB just-rebooted, there isn't 12 GB to spare. **Solution** in `New-A-SCCM.ps1`: `-RamGB 12 -StartupGB 6` (boots at 6 GB, grows up to 12 GB under load via Dynamic Memory). `New-LabVM` accepts `-StartupGB` as an explicit lower-than-max override.
 - **Per-VM creation time on the new flow: ~2 minutes end-to-end** (smaller VMs). DISM `/Set-Edition` is fast (~12 sec); the bulk is OOBE + WinRM-ready wait + the conversion reboot.
 - **Boot order observation (matches plan):** A-DC → A-DFSR → A-MPDP → A-SQLSCCM → A-SCCM. For A-SCCM only: stop `hermes-linux` before starting it, restart hermes-linux after A-SCCM has ballooned down (~30 sec). **Never stop Jarvis** at any point.
@@ -565,4 +555,3 @@ Online means `OfflineMode` prop = 0). The role runs as threads under SMS_EXECUTI
 ## Memory & Conventions
 
 - This project uses Claude Code auto-memory at `C:\Users\Itamartz\.claude\projects\C--Users-Itamartz-Dropbox-System--FORWORK-LabSystemCenterInHome\memory\`. Read `MEMORY.md` for user/project preferences captured across sessions.
-- The full original Azure design document is at `..\LabSystemCenterInAzure\LAB-PLAN.md` — useful as a single-file reference for the end-state.
