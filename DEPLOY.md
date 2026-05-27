@@ -117,7 +117,7 @@ Place each under `Files\<Tool>\` (then stage to the host — Option A below):
 |---|---|---|
 | `Base` (VHDX) | **Windows Server 2025** Eval — parent VHDX (or build one from the ISO) | Microsoft Evaluation Center |
 | `SQL` | **SQL Server 2019** Developer/Eval ISO **+ CU32** | Microsoft (SQL 2019 Developer is free) + Latest CU |
-| `SCCM` | **Configuration Manager** `MEM_Configmgr_<ver>.exe` | Microsoft **Evaluation** download (or VLSC) |
+| `SCCM` | **Configuration Manager 2509** — `ConfigMgr_2509.exe` (eval) or `MEM_Configmgr_2509.exe` (VLSC) | **Eval direct link:** `https://go.microsoft.com/fwlink/?linkid=2350307` (→ `ConfigMgr_2509.exe`) |
 | `ADK` + `ADKPE` | **Windows ADK** + **WinPE add-on** (matching the OS) | Microsoft (free) |
 | `SSMS` | SQL Server Management Studio | Microsoft (free) |
 | `SSRS` | `SQLServerReportingServices.exe` (SSRS 2022) | Microsoft (free) — also auto-downloaded by `Configure-SCCMReporting.ps1` |
@@ -127,6 +127,7 @@ Place each under `Files\<Tool>\` (then stage to the host — Option A below):
 | `VCRedist` | `vc_redist.x64.exe` **and** `vc_redist.x86.exe` (2015-2022) | `https://aka.ms/vs/17/release/vc_redist.x64.exe` / `.x86.exe` |
 | `ReportBuilder` | Report Builder | Microsoft (free) |
 | `SxS` | the WS2025 `\sources\sxs` folder (for .NET 3.5 / feature payloads) | from the WS2025 ISO |
+| `SCOM` *(Phase 2)* | **System Center Operations Manager 2025** — `SCOM_2025.zip` | **Eval direct link:** `https://go.microsoft.com/fwlink/?linkid=2292308` (→ `SCOM_2025.zip`) — only needed for the deferred SCOM build |
 
 > The earlier convenience option (a personal Dropbox zip via `Download-LabFiles.ps1`) is
 > **not portable** to another environment — its URL points at the original author's Dropbox.
@@ -159,15 +160,16 @@ Invoke-LabHost {
 }
 ```
 
-`MEM_Configmgr_<version>.exe` for SCCM Current Branch is available from the **Microsoft Evaluation Center** (free 180-day eval) or VLSC/M365 Admin Center. Place it at `C:\HyperV-Lab\Files\SCCM\MEM_Configmgr_2509.exe` (or current version). It then needs extracting before step 7's AD schema extension can find `extadsch.exe`:
+SCCM Current Branch 2509 is a free 180-day eval — **direct link `https://go.microsoft.com/fwlink/?linkid=2350307`** (downloads `ConfigMgr_2509.exe`; VLSC names it `MEM_Configmgr_2509.exe`). Place it under `C:\HyperV-Lab\Files\SCCM\`. It self-extracts to the media tree, which section 6 step 7 (AD schema extension) needs for `extadsch.exe` / `setup.exe`:
 
 ```powershell
 Invoke-LabHost {
-  $exe = 'C:\HyperV-Lab\Files\SCCM\MEM_Configmgr_2509.exe'
+  # accept either the eval or VLSC filename
+  $exe = Get-ChildItem 'C:\HyperV-Lab\Files\SCCM\ConfigMgr_2509.exe','C:\HyperV-Lab\Files\SCCM\MEM_Configmgr_2509.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
   $dst = 'C:\HyperV-Lab\Files\SCCM\extracted'
-  if (-not (Test-Path "$dst\SMSSETUP\BIN\X64\setup.exe")) {
+  if ($exe -and -not (Test-Path "$dst\SMSSETUP\BIN\X64\setup.exe")) {
     New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    Start-Process -FilePath $exe -ArgumentList '/Auto',$dst,'/Quiet' -Wait -NoNewWindow
+    Start-Process -FilePath $exe.FullName -ArgumentList '/Auto',$dst,'/Quiet' -Wait -NoNewWindow
   }
 }
 ```
