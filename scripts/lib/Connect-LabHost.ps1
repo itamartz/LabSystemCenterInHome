@@ -197,10 +197,10 @@ function Invoke-LabVM {
         $pwd  = if ($UseDomain) { $DomainPwd } else { $LocalPwd }
         $cred = New-Object PSCredential($user, (ConvertTo-SecureString $pwd -AsPlainText -Force))
 
-        $sessionOpt = New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 60000
+        # NOTE: Invoke-Command's -VMName (PowerShell Direct) parameter set does NOT
+        # accept -SessionOption; passing it throws "Parameter set cannot be resolved".
         $sb = [scriptblock]::Create($InnerSb)
-        Invoke-Command -VMName $Name -Credential $cred -ScriptBlock $sb `
-                       -SessionOption $sessionOpt -ErrorAction Stop
+        Invoke-Command -VMName $Name -Credential $cred -ScriptBlock $sb -ErrorAction Stop
     } -ArgumentList @($VMName, [bool]$UseDomainCredential, $LocalAdminPassword, $DomainAdminPassword, $ScriptBlock.ToString())
 }
 
