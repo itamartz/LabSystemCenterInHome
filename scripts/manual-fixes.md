@@ -775,87 +775,115 @@ Server2025-OS-24H2 / Windows 11 / Defender AV. ADR `Servers - Monthly Security +
 
 ---
 
-## 2026-05-27: Monitoring > Site Status shows a Critical with an empty "Show Messages" window
+## 2026-05-27: Site Status Critical on A-SQLSCCM with an empty "Show Messages" window (orphaned SMS Component Server from a disabled Backup task)
 
 **Symptom:** In the console, Monitoring > System Status > **Site Status** shows a **Critical**
 on the **SMS Component Server** role for **A-SQLSCCM**. Right-clicking it and choosing
 **Show Messages > All** opens the Status Message Viewer and it is **empty** - no message to
-read. Clicking **Reset Counts** appears to do nothing (the Critical stays).
+read. **Reset Counts** does nothing, and **`Restart-Service SMS_EXECUTIVE` does NOT clear it**
+either (we tried both).
 
-**Why the message window is empty:** This Critical does NOT come from a component status
-message. It comes from the **site-system storage** state tracked by the Site System Status
-Summarizer (WMI class `SMS_SiteSystemSummarizer`). "Show Messages" only renders logged
-**status messages** (the component world, `SMS_ComponentSummarizer` / `SMS_StatusMessage`).
-A storage/availability state has no backing status message, so there is literally nothing for
-the viewer to show. An empty Show-Messages window on a Site Status Critical is the tell that
-you are looking at a **site-system storage/availability** state, not a component fault.
+> NOTE: An earlier version of this entry concluded "stale low-disk-space, self-clears on the
+> 60-min Wakeup." **That was wrong.** The disk numbers were a red herring (see below). The
+> real cause is an orphaned component-server role whose availability can't be polled.
 
-**Why "Reset Counts" does nothing here:** "Reset Counts" maps to
-`SMS_ComponentSummarizer.DeleteStatistics` - it zeroes the error/warning/info **counts** for
-*components*. It does not touch `SMS_SiteSystemSummarizer`, which has **no reset method at
-all** (confirmed: `(Get-CimClass SMS_SiteSystemSummarizer).CimClassMethods` is empty; only
-`SMS_ComponentSummarizer` exposes `DeleteStatistics`). So Reset Counts cannot clear a
-site-system storage Critical by design.
+**Why the message window is empty:** This Critical does NOT come from a logged component
+status message - it is a **site-system state** in `SMS_SiteSystemSummarizer`. "Show Messages"
+only renders `SMS_StatusMessage` rows (the `SMS_ComponentSummarizer` world). A site-system
+storage/availability state has no backing status message, so the viewer is empty. **An empty
+Show-Messages window on a Site Status Critical is the tell that you are looking at a
+site-system summarizer state, not a component fault - so go read `sitestat.log`, not the
+message viewer.**
 
-### Diagnosis (read-only WMI in `root\SMS\site_PR1` on A-SCCM)
+**Why "Reset Counts" does nothing:** it maps to `SMS_ComponentSummarizer.DeleteStatistics`
+(zeroes *component* status-message counts). `SMS_SiteSystemSummarizer` has **no reset method
+at all** (`(Get-CimClass SMS_SiteSystemSummarizer).CimClassMethods` is empty). Wrong
+summarizer - it cannot touch a site-system state.
 
-The console just reads these classes; query them directly. Status: `0`=OK, `1`=Warning,
-`2`=Critical.
+### Root cause (verified)
+
+A-SQLSCCM is the remote **site database** server. At some point the **Backup SMS Site Server**
+maintenance task was enabled, which installs the `SMS_SITE_SQL_BACKUP_<siteserver>` component
+on the SQL box and thereby tags it with the **SMS Component Server** role. The task was later
+**disabled** (`SMS_SCI_SQLTask 'Backup SMS Site Server'.Enabled = False`), but the
+component-server registration was **never cleaned up** - it is now an **orphan**:
+
+- `SMS_SCI_SysResUse` for A-SQLSCCM still lists roles: `SMS Site System`, `SMS SQL Server`,
+  **`SMS Component Server`**.
+- `HKLM:\SOFTWARE\Microsoft\SMS\Operations Management\Components` on A-SQLSCCM has exactly
+  **one** subkey, `SMS_SITE_SQL_BACKUP_A-SCCM.SADAB.PRI` (a real component server like A-MPDP
+  has SMS_EXECUTIVE, SMS_MP_CONTROL_MANAGER, SMS_WSUS_CONTROL_MANAGER, etc).
+
+The Site System Status Summarizer keeps **polling** the SMS-Component-Server role's
+availability on A-SQLSCCM and cannot resolve it, so it records `AvailabilityState = 4`
+(unknown) -> `Status = 2` (Critical). `sitestat.log` on A-SCCM shows the smoking gun:
+```
+omGetServerRoleAvailabilityState could not read from the registry on A-SQLSCCM.SADAB.PRI; error = 5
+Failed to get the Availability State on server A-SQLSCCM.SADAB.PRI for role SMS Component Server.
+... for role SMS SQL Server.
+```
+(A-MPDP never hits this: its MP/DP/SUP roles **push** a heartbeat `.SUM` file into
+`inboxes\sitestat.box` - "Updating its AvailabilityStat to 0" - so the summarizer never has to
+pull its registry. A-SQLSCCM has no such pushing role, so it is **polled**, and the poll
+fails.)
+
+### What it is NOT (ruled out)
+
+- **NOT disk space.** Live C: on A-SQLSCCM = 63.7 GB / **15.4 GB free / 24%**. The summarizer
+  thresholds (from the `SiteObject Thresholds` PropList: `FW=10485760` / `FE=5242880` KB =
+  **10 GB warn / 5 GB critical**, absolute) are both far below 15.4 GB free. Storage is fine.
+- **NOT an ACL / RemoteRegistry problem.** RemoteRegistry is Running on A-SQLSCCM; the
+  `winreg` key ACL and the SMS key ACLs are byte-identical to A-MPDP (Administrators
+  FullControl). `A-SCCM$` is local admin on A-SQLSCCM (direct + via `SCCM_Site_Servers`).
+- **NOT a machine-account-token issue.** A read run **as SYSTEM on A-SCCM** (i.e. authenticating
+  as `A-SCCM$`, SMS_Executive's exact identity) successfully reads the component's own keys -
+  `SMS_SITE_SQL_BACKUP...\Availability State = 0`, current heartbeat. The component itself is
+  healthy; only the summarizer's *role-level* poll fails. (`HKLM\SOFTWARE\Microsoft\SMS\
+  Identification` is **absent** on A-SQLSCCM - this box never had a full site-system footprint.)
+
+### Diagnosis commands (read-only)
 
 ```powershell
 . .\scripts\lib\Connect-LabHost.ps1
 Invoke-LabVM -VMName 'A-SCCM' -UseDomainCredential -ScriptBlock {
   $ns = 'root\SMS\site_PR1'
-  # 1. Components - all healthy here (returns nothing)
-  Get-CimInstance -Namespace $ns -ClassName SMS_ComponentSummarizer |
-    Where-Object Status -ne 0 | Select ComponentName, MachineName, Status, Errors, Warnings
-  # 2. Site systems - THIS is the Critical row
+  # The Critical row (Status 0=OK 1=Warn 2=Crit; AvailabilityState 4 = unknown/can't poll)
   Get-CimInstance -Namespace $ns -ClassName SMS_SiteSystemSummarizer |
-    Where-Object Status -ne 0 | Format-List Role, SiteSystem, ObjectType, Status,
-      PercentFree, BytesFree, BytesTotal, AvailabilityState
-  # 3. The summarizer's storage thresholds (absolute KB) + re-eval interval
-  (Get-CimInstance -Namespace $ns -ClassName SMS_SCI_Component |
-    Where-Object ComponentName -eq 'SMS_SITE_SYSTEM_STATUS_SUMMARIZER').Props |
-    Select PropertyName, Value
+    Where-Object Status -ne 0 | Select Role, Status, AvailabilityState, PercentFree, SiteSystem
+  # Roles still registered on A-SQLSCCM (note the leftover 'SMS Component Server')
+  Get-CimInstance -Namespace $ns -ClassName SMS_SCI_SysResUse |
+    Where-Object NetworkOSPath -like '*A-SQLSCCM*' | Select RoleName
+  # The backup task that created it (now Enabled = False)
+  Get-CimInstance -Namespace $ns -ClassName SMS_SCI_SQLTask `
+    -Filter "TaskName='Backup SMS Site Server' AND SiteCode='PR1'" | Select TaskName, Enabled
+}
+# The authoritative reason - the summarizer's own log:
+Invoke-LabVM -VMName 'A-SCCM' -UseDomainCredential -ScriptBlock {
+  Get-Content 'C:\Program Files\Microsoft Configuration Manager\Logs\sitestat.log' |
+    Select-String 'AvailabilityState|Failed to get the Availability|SQLSCCM' | Select-Object -Last 20
 }
 ```
 
-What it returned:
-- `SMS_ComponentSummarizer`: **nothing** not-OK -> every component (SMS_EXECUTIVE threads,
-  MP, DP, SUP, SCP, RSP) is healthy. Nothing is functionally broken.
-- `SMS_SiteSystemSummarizer`: **one** Critical row - Role `SMS Component Server`, ObjectType
-  `0`, SiteObject `...\\A-SQLSCCM.SADAB.PRI\C$\SMS_A-SCCM.SADAB.PRI\`, `Status=2`,
-  `PercentFree=24`, `BytesFree=16144324` KB (~15.4 GB), `BytesTotal=66772876` KB (~63.7 GB).
-  (Cross-checked with `Win32_LogicalDisk` on A-SQLSCCM: C: = 63.7 GB / 15.4 GB free / 24%.)
-- Summarizer props: **`Warning Threshold = 10485760`** (KB = 10 GB),
-  **`Error Threshold = 5242880`** (KB = 5 GB), **`Wakeup Interval = 60`** (minutes). These are
-  **absolute free-space** thresholds, not percentages: Warning if free < 10 GB, Critical if
-  free < 5 GB.
+### How to clear it (resolution)
 
-**Conclusion - it is a STALE Critical.** Live free space is **15.4 GB**, which is *above*
-both the 10 GB warning and 5 GB critical thresholds, so the live numbers do not justify any
-alert. The Critical is left over from earlier build-time disk pressure on A-SQLSCCM's small
-63.7 GB C: (the same pressure that led to expanding A-SCCM's C: to 100 GB). The summarizer
-had not yet re-evaluated it to OK.
-
-### How to clear it
-
-- **Do nothing** - the Site System Status Summarizer re-polls every **60 min** (`Wakeup
-  Interval`). On the next pass it sees 15.4 GB > 5 GB and flips the row to OK on its own.
-- **Force it now** - restart the summarizer thread by bouncing SMS_EXECUTIVE on A-SCCM
-  (mildly disruptive; fine in a lab). After it comes back, re-run the query above:
-  ```powershell
-  Invoke-LabVM -VMName 'A-SCCM' -UseDomainCredential -ScriptBlock { Restart-Service SMS_EXECUTIVE }
-  ```
-- **Permanent fix** (only if A-SQLSCCM actually keeps running low): expand A-SQLSCCM's C:
-  beyond 63.7 GB, same as A-SCCM's C: was taken to 100 GB.
+The fix is to make Site Component Manager **de-register the orphaned SMS Component Server role**
+on A-SQLSCCM so the box is monitored only as `SMS SQL Server` (which is checked via SQL, not
+the failing registry pull). Cleanest route: **re-enable the Backup SMS Site Server task, let it
+install cleanly, then disable it again** so SCM runs a proper uninstall of `SMS_SITE_SQL_BACKUP`
+and drops the component-server role. After SCM reconciles (watch `sitecomp.log`), the
+summarizer stops polling A-SQLSCCM as a component server and the Critical clears. Alternative:
+re-enable the task and keep it (a properly-configured, running backup component reports
+AvailabilityState 0 and goes green). Leaving it as-is is also defensible in a lab - the alert
+is a cosmetic false-positive; nothing is actually broken.
+**(Resolution not yet applied - pending decision on whether to re-enable site backup.)**
 
 ### Lesson learned
 
-A Site Status **Critical whose "Show Messages" window is empty** = a site-system
-**storage/availability** state in `SMS_SiteSystemSummarizer`, not a logged component error,
-and **Reset Counts will not clear it** (wrong summarizer, and the site-system summarizer has
-no reset method). Diagnose by reading `SMS_SiteSystemSummarizer` and comparing `BytesFree`
-against the `SMS_SITE_SYSTEM_STATUS_SUMMARIZER` `Warning`/`Error Threshold` props (absolute
-KB). If free space is already above the thresholds, the alert is stale - it self-clears on
-the 60-min Wakeup, or immediately after `Restart-Service SMS_EXECUTIVE`.
+A Site Status **Critical with an empty "Show Messages" window** is a `SMS_SiteSystemSummarizer`
+state, not a logged error - **diagnose from `sitestat.log`, not the message viewer**, and note
+that **neither Reset Counts nor restarting SMS_EXECUTIVE clears it**. When the row shows
+`AvailabilityState <> 0` but storage is fine and the underlying component is healthy, suspect a
+**role the summarizer must poll but can't** - very often an **orphaned role** (here: an
+SMS Component Server left behind by a Backup task that was enabled once and later disabled).
+Confirm with `SMS_SCI_SysResUse` (which roles the site thinks the box has) vs the actual
+`Operations Management\Components` subkeys on the box.
