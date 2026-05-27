@@ -1,0 +1,50 @@
+{
+    "hostA": {
+        "hostname": "NUCBOX_K12",
+        "ip": "100.100.71.55",
+        "ramGB": 28.8,
+        "cpus": 16,
+        "diskGB": 930,
+        "vSwitch": "Lab",
+        "vSwitchHostIP": "10.10.0.1",
+        "siteSubnet": "10.10.0.0/24"
+    },
+    "hostB": {
+        "hostname": null,
+        "ip": null,
+        "ramGB": null,
+        "cpus": null,
+        "diskGB": null,
+        "vSwitch": "Lab",
+        "vSwitchHostIP": "10.20.0.1",
+        "siteSubnet": "10.20.0.0/24",
+        "_comment": "Filled in when host #2 arrives"
+    },
+    "paths": {
+        "labRoot": "C:\\HyperV-Lab",
+        "vhdRoot": "C:\\HyperV-Lab\\VHDs",
+        "vmRoot": "C:\\HyperV-Lab\\VMs",
+        "parentVhdx": "C:\\HyperV-Lab\\Base\\WS2025-Eval.vhdx",
+        "mediaShare": "\\\\10.10.0.1\\LabMedia"
+    },
+    "domain": {
+        "fqdn": "sadab.pri",
+        "netbios": "SADAB",
+        "dcIP": "10.10.0.2"
+    },
+    "sccm": {
+        "siteCode": "PR1",
+        "siteName": "SADAB Lab",
+        "databaseName": "CM_PR1"
+    },
+    "scom": {
+        "managementGroup": "LAB-SCOM-MG"
+    },
+    "defaults": {
+        "_warning": "These are lab-only credentials. Real secrets go in .\\.secrets\\.",
+        "localAdminPassword": "LabAdmin@2026!",
+        "domainAdminPassword": "LabAdmin@2026!",
+        "dsrmPassword": "LabAdmin@2026!"
+    },
+    "timezone": "Israel Standard Time"
+}

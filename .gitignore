@@ -1,0 +1,80 @@
+# =====================================================================
+# Secrets — must NEVER be committed
+# =====================================================================
+.secrets/
+*.cred.xml
+*.key
+*.pem
+*.pfx
+*.token
+tskey*.txt
+
+# =====================================================================
+# Local config overlays — machine-specific values
+# =====================================================================
+lab-config.local.json
+.env
+.env.local
+*.local.json
+
+# =====================================================================
+# Operational logs and runtime state
+# =====================================================================
+*.log
+*.log.*
+.bootstrap-phase
+download-progress.json
+
+# Editor/tool temp + backup artifacts
+*.tmp
+*.tmp.*
+*.bak
+*.orig
+
+# =====================================================================
+# Large media — only the install scripts are versioned, not binaries
+# (silent installers live at Files/<Tool>/Install-Silent.ps1)
+# =====================================================================
+Files/**/*.vhdx
+Files/**/*.vhd
+Files/**/*.iso
+Files/**/*.img
+Files/**/*.zip
+Files/**/*.7z
+Files/**/*.msi
+Files/**/*.exe
+Files/**/*.cab
+Files/**/*.bin
+# Explicitly allow installer wrappers
+!Files/**/Install-Silent.ps1
+!Files/**/README.md
+
+# =====================================================================
+# Terraform (in case we ever add one)
+# =====================================================================
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+!*.tfvars.template
+
+# =====================================================================
+# Editor / OS cruft
+# =====================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# =====================================================================
+# PowerShell module cache + transcript logs
+# =====================================================================
+*.ps1xml.cache
+PowerShell_transcript.*
