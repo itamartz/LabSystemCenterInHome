@@ -772,3 +772,90 @@ SUP on A-MPDP, HTTPS 8531 (WID), Microsoft Update sync, Security+Critical only, 
 Server2025-OS-24H2 / Windows 11 / Defender AV. ADR `Servers - Monthly Security + Critical`
 (Last1Month, x64, Server OS) -> SUG (KB5087051) -> Required deployment to `All Servers`
 (PR100014), content on the A-MPDP DP (package PR100009). A-DFSR installed KB5087051.
+
+---
+
+## 2026-05-27: Monitoring > Site Status shows a Critical with an empty "Show Messages" window
+
+**Symptom:** In the console, Monitoring > System Status > **Site Status** shows a **Critical**
+on the **SMS Component Server** role for **A-SQLSCCM**. Right-clicking it and choosing
+**Show Messages > All** opens the Status Message Viewer and it is **empty** - no message to
+read. Clicking **Reset Counts** appears to do nothing (the Critical stays).
+
+**Why the message window is empty:** This Critical does NOT come from a component status
+message. It comes from the **site-system storage** state tracked by the Site System Status
+Summarizer (WMI class `SMS_SiteSystemSummarizer`). "Show Messages" only renders logged
+**status messages** (the component world, `SMS_ComponentSummarizer` / `SMS_StatusMessage`).
+A storage/availability state has no backing status message, so there is literally nothing for
+the viewer to show. An empty Show-Messages window on a Site Status Critical is the tell that
+you are looking at a **site-system storage/availability** state, not a component fault.
+
+**Why "Reset Counts" does nothing here:** "Reset Counts" maps to
+`SMS_ComponentSummarizer.DeleteStatistics` - it zeroes the error/warning/info **counts** for
+*components*. It does not touch `SMS_SiteSystemSummarizer`, which has **no reset method at
+all** (confirmed: `(Get-CimClass SMS_SiteSystemSummarizer).CimClassMethods` is empty; only
+`SMS_ComponentSummarizer` exposes `DeleteStatistics`). So Reset Counts cannot clear a
+site-system storage Critical by design.
+
+### Diagnosis (read-only WMI in `root\SMS\site_PR1` on A-SCCM)
+
+The console just reads these classes; query them directly. Status: `0`=OK, `1`=Warning,
+`2`=Critical.
+
+```powershell
+. .\scripts\lib\Connect-LabHost.ps1
+Invoke-LabVM -VMName 'A-SCCM' -UseDomainCredential -ScriptBlock {
+  $ns = 'root\SMS\site_PR1'
+  # 1. Components - all healthy here (returns nothing)
+  Get-CimInstance -Namespace $ns -ClassName SMS_ComponentSummarizer |
+    Where-Object Status -ne 0 | Select ComponentName, MachineName, Status, Errors, Warnings
+  # 2. Site systems - THIS is the Critical row
+  Get-CimInstance -Namespace $ns -ClassName SMS_SiteSystemSummarizer |
+    Where-Object Status -ne 0 | Format-List Role, SiteSystem, ObjectType, Status,
+      PercentFree, BytesFree, BytesTotal, AvailabilityState
+  # 3. The summarizer's storage thresholds (absolute KB) + re-eval interval
+  (Get-CimInstance -Namespace $ns -ClassName SMS_SCI_Component |
+    Where-Object ComponentName -eq 'SMS_SITE_SYSTEM_STATUS_SUMMARIZER').Props |
+    Select PropertyName, Value
+}
+```
+
+What it returned:
+- `SMS_ComponentSummarizer`: **nothing** not-OK -> every component (SMS_EXECUTIVE threads,
+  MP, DP, SUP, SCP, RSP) is healthy. Nothing is functionally broken.
+- `SMS_SiteSystemSummarizer`: **one** Critical row - Role `SMS Component Server`, ObjectType
+  `0`, SiteObject `...\\A-SQLSCCM.SADAB.PRI\C$\SMS_A-SCCM.SADAB.PRI\`, `Status=2`,
+  `PercentFree=24`, `BytesFree=16144324` KB (~15.4 GB), `BytesTotal=66772876` KB (~63.7 GB).
+  (Cross-checked with `Win32_LogicalDisk` on A-SQLSCCM: C: = 63.7 GB / 15.4 GB free / 24%.)
+- Summarizer props: **`Warning Threshold = 10485760`** (KB = 10 GB),
+  **`Error Threshold = 5242880`** (KB = 5 GB), **`Wakeup Interval = 60`** (minutes). These are
+  **absolute free-space** thresholds, not percentages: Warning if free < 10 GB, Critical if
+  free < 5 GB.
+
+**Conclusion - it is a STALE Critical.** Live free space is **15.4 GB**, which is *above*
+both the 10 GB warning and 5 GB critical thresholds, so the live numbers do not justify any
+alert. The Critical is left over from earlier build-time disk pressure on A-SQLSCCM's small
+63.7 GB C: (the same pressure that led to expanding A-SCCM's C: to 100 GB). The summarizer
+had not yet re-evaluated it to OK.
+
+### How to clear it
+
+- **Do nothing** - the Site System Status Summarizer re-polls every **60 min** (`Wakeup
+  Interval`). On the next pass it sees 15.4 GB > 5 GB and flips the row to OK on its own.
+- **Force it now** - restart the summarizer thread by bouncing SMS_EXECUTIVE on A-SCCM
+  (mildly disruptive; fine in a lab). After it comes back, re-run the query above:
+  ```powershell
+  Invoke-LabVM -VMName 'A-SCCM' -UseDomainCredential -ScriptBlock { Restart-Service SMS_EXECUTIVE }
+  ```
+- **Permanent fix** (only if A-SQLSCCM actually keeps running low): expand A-SQLSCCM's C:
+  beyond 63.7 GB, same as A-SCCM's C: was taken to 100 GB.
+
+### Lesson learned
+
+A Site Status **Critical whose "Show Messages" window is empty** = a site-system
+**storage/availability** state in `SMS_SiteSystemSummarizer`, not a logged component error,
+and **Reset Counts will not clear it** (wrong summarizer, and the site-system summarizer has
+no reset method). Diagnose by reading `SMS_SiteSystemSummarizer` and comparing `BytesFree`
+against the `SMS_SITE_SYSTEM_STATUS_SUMMARIZER` `Warning`/`Error Threshold` props (absolute
+KB). If free space is already above the thresholds, the alert is stale - it self-clears on
+the 60-min Wakeup, or immediately after `Restart-Service SMS_EXECUTIVE`.
