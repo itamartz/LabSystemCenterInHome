@@ -173,7 +173,7 @@ LabSystemCenterInHome\
 - `Files\*\Install-Silent.ps1` — silent installers
 
 **Host preparation:**
-- `scripts\setup\Configure-Host.ps1` — one-shot, idempotent host prep (the `Lab` NAT vSwitch + parent VHDX + diff disk + unattend + VM creation prerequisites), run against a host via WinRM. (`scripts\Bootstrap-Host*.ps1` are earlier host-bootstrap drafts kept for reference.)
+- `scripts\setup\Configure-Host.ps1` — one-shot, idempotent host prep (the `Lab` NAT vSwitch + parent VHDX + diff disk + unattend + VM creation prerequisites), run against a host via WinRM.
 - VM lifecycle is handled with local `Get-VM | Start-VM` / `Stop-VM` (sequential boot, smallest→largest).
 
 ## Connection / Remote Access
