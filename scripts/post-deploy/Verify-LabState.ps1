@@ -69,7 +69,7 @@ function Add-Rows($rows) { foreach ($r in @($rows)) { if ($r) { $all.Add($r) } }
 
 $run = { param($name) $Stage -eq 'All' -or $Stage -eq $name }
 
-# â”€â”€ Infra: edition / domain / IP across the 5 Site A VMs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Infra: edition / domain / IP across the 5 Site A VMs --
 if (& $run 'Infra') {
     Write-LabLog "Stage Infra: VM edition / domain / IP..." -Step 'Verify'
     $expect = @(
@@ -94,7 +94,7 @@ if (& $run 'Infra') {
     }
 }
 
-# â”€â”€ Identity: DC, CA, reporting account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Identity: DC, CA, reporting account --
 if (& $run 'Identity') {
     Write-LabLog "Stage Identity: DC / CA / SCCM_Reports..." -Step 'Verify'
     Add-Rows (Invoke-LabRemote -IPAddress '10.10.0.2' -Credential $DomainCred -ArgumentList @($RowFn) -ScriptBlock {
@@ -111,7 +111,7 @@ if (& $run 'Identity') {
     })
 }
 
-# â”€â”€ Sql: version / collation / databases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Sql: version / collation / databases --
 if (& $run 'Sql') {
     Write-LabLog "Stage Sql: SQL 2019 CU32 / collation / DBs..." -Step 'Verify'
     Add-Rows (Invoke-LabRemote -IPAddress '10.10.0.4' -Credential $DomainCred -ArgumentList @($RowFn) -ScriptBlock {
@@ -132,7 +132,7 @@ if (& $run 'Sql') {
     })
 }
 
-# â”€â”€ Site: services / version / hotfix / SCP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Site: services / version / hotfix / SCP --
 if (& $run 'Site') {
     Write-LabLog "Stage Site: services / version / KB36949461 / SCP..." -Step 'Verify'
     Add-Rows (Invoke-LabRemote -IPAddress '10.10.0.3' -Credential $DomainCred -ArgumentList @($RowFn,$NS) -ScriptBlock {
@@ -154,7 +154,7 @@ if (& $run 'Site') {
     })
 }
 
-# â”€â”€ Roles: site roles / clients / collection / apps â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Roles: site roles / clients / collection / apps --
 if (& $run 'Roles') {
     Write-LabLog "Stage Roles: MP/DP/SUP/RSP + clients + collection + apps..." -Step 'Verify'
     Add-Rows (Invoke-LabRemote -IPAddress '10.10.0.3' -Credential $DomainCred -ArgumentList @($RowFn,$NS) -ScriptBlock {
@@ -193,7 +193,7 @@ if (& $run 'Roles') {
     })
 }
 
-# â”€â”€ Discovery: methods / boundaries / client settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Discovery: methods / boundaries / client settings --
 if (& $run 'Discovery') {
     Write-LabLog "Stage Discovery: methods / boundaries / client settings..." -Step 'Verify'
     Add-Rows (Invoke-LabRemote -IPAddress '10.10.0.3' -Credential $DomainCred -ArgumentList @($RowFn,$NS) -ScriptBlock {
@@ -222,7 +222,7 @@ if (& $run 'Discovery') {
     })
 }
 
-# â”€â”€ Updates: SUP / ADR / WSUS SSL / reporting cert / PKI / client cert â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Updates: SUP / ADR / WSUS SSL / reporting cert / PKI / client cert --
 if (& $run 'Updates') {
     Write-LabLog "Stage Updates: SUP / ADR / WSUS SSL / SSRS cert / PKI..." -Step 'Verify'
     # SUP config + ADR + reporting cert + MP/site PKI (A-SCCM SMS provider + local cert store)
@@ -270,7 +270,7 @@ if (& $run 'Updates') {
     })
 }
 
-# â”€â”€ Report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# -- Report --
 ""
 $all | Format-Table Area, Check, Expected, Actual, Status -AutoSize | Out-String -Width 200 | Write-Host
 $pass = @($all | Where-Object Status -eq 'PASS').Count

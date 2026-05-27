@@ -552,6 +552,23 @@ Online means `OfflineMode` prop = 0). The role runs as threads under SMS_EXECUTI
 (SMS_DMP_DOWNLOADER/UPLOADER) — there is no standalone Windows service, so an empty
 `Get-Service SMS_SERVICE_CONNECTION_POINT` is normal. Clean install, no gotchas.
 
+## Verifying Lab State (read-only — 2026-05-27)
+
+`scripts\post-deploy\Verify-LabState.ps1` is a **read-only, side-effect-free** check that the
+live lab still matches the state tables in this file. It is the executable form of the docs —
+the validation half of the "repo must recreate AND validate the lab" convention. Host-run via
+`Invoke-LabRemote` (Hyper-V direct), `Write-LabLog`, PS 5.1; ASCII-only so it survives
+`Copy-Item -ToSession` staging. Stage-selectable (`Infra`, `Identity`, `Sql`, `Site`, `Roles`,
+`Discovery`, `Updates`, or `All`); prints a per-check PASS/FAIL table + summary. Last full run:
+**60/60 PASS**.
+
+```powershell
+. .\scripts\lib\Connect-LabHost.ps1
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Verify-LabState.ps1' -DomainAdminPassword 'LabAdmin@2026!' }
+# one stage only:
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Verify-LabState.ps1' -Stage Updates -DomainAdminPassword 'LabAdmin@2026!' }
+```
+
 ## Memory & Conventions
 
 - This project uses Claude Code auto-memory at `C:\Users\Itamartz\.claude\projects\C--Users-Itamartz-Dropbox-System--FORWORK-LabSystemCenterInHome\memory\`. Read `MEMORY.md` for user/project preferences captured across sessions.
