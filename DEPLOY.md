@@ -116,18 +116,21 @@ Place each under `Files\<Tool>\` (then stage to the host — Option A below):
 | Tool dir | What | Where to get it |
 |---|---|---|
 | `Base` (VHDX) | **Windows Server 2025** Eval — parent VHDX (or build one from the ISO) | **Eval page:** `https://go.microsoft.com/fwlink/?linkid=2268830` (WS2025 Evaluation Center — ISO/VHD; form-gated, not a direct file) |
-| `SQL` | **SQL Server 2019** Developer/Eval ISO **+ CU32** | Microsoft (SQL 2019 Developer is free) + Latest CU |
-| `SCCM` | **Configuration Manager 2509** — `ConfigMgr_2509.exe` (eval) or `MEM_Configmgr_2509.exe` (VLSC) | **Eval direct link:** `https://go.microsoft.com/fwlink/?linkid=2350307` (→ `ConfigMgr_2509.exe`) |
-| `ADK` + `ADKPE` | **Windows ADK** + **WinPE add-on** (matching the OS) | Microsoft (free) |
-| `SSMS` | SQL Server Management Studio | Microsoft (free) |
-| `SSRS` | `SQLServerReportingServices.exe` (SSRS 2022) | Microsoft (free) — also auto-downloaded by `Configure-SCCMReporting.ps1` |
-| `ODBC18` | `msodbcsql18.msi` | Microsoft (free) |
+| `SQL` | **SQL Server 2019** Developer + CU32 | `https://go.microsoft.com/fwlink/?linkid=866662` → `sql2019_bootstrapper.exe`, then `…/sql2019_bootstrapper.exe /Action=Download /MediaType=ISO /MediaPath=… /Quiet` → `SQLServer2019-x64-ENU-Dev.iso`. CU32 separately from Microsoft. |
+| `SCCM` | **Configuration Manager 2509** — `ConfigMgr_2509.exe` (eval) or `MEM_Configmgr_2509.exe` (VLSC) | **Eval:** `https://go.microsoft.com/fwlink/?linkid=2350307` (→ `ConfigMgr_2509.exe`) |
+| `ADK` | **Windows ADK** | `https://go.microsoft.com/fwlink/?linkid=2271337` → `adksetup.exe` (offline: `adksetup.exe /layout <dir> /quiet`) |
+| `ADKPE` | **Windows PE add-on** for the ADK | `https://go.microsoft.com/fwlink/?linkid=2271338` → `adkwinpesetup.exe` (offline: `/layout <dir> /quiet`) |
+| `SSMS` | SQL Server Management Studio | `https://aka.ms/ssmsfullsetup` → `SSMS-Setup-ENU.exe` |
+| `SSRS` | `SQLServerReportingServices.exe` | `https://download.microsoft.com/download/1/a/a/1aaa9177-3578-4931-b8f3-373b24f63342/SQLServerReportingServices.exe` (also auto-downloaded by `Configure-SCCMReporting.ps1`) |
+| `ODBC18` | `msodbcsql18.msi` — **must be 18.5.x** | `https://go.microsoft.com/fwlink/?linkid=2335671` (v18.5.2.1). **Do NOT use 18.6.x — a known bug breaks SCCM DB initialization.** |
+| `WebView2` | Edge WebView2 Runtime (SCCM console) | `https://go.microsoft.com/fwlink/?linkid=2124701` → `MicrosoftEdgeWebView2RuntimeInstallerX64.exe` |
 | `SQLNCLI` | SQL Server Native Client 11 `sqlncli.msi` | Microsoft (free) |
 | `SQLCLRTypes` | SQL CLR Types | Microsoft (free) |
 | `VCRedist` | `vc_redist.x64.exe` **and** `vc_redist.x86.exe` (2015-2022) | `https://aka.ms/vs/17/release/vc_redist.x64.exe` / `.x86.exe` |
 | `ReportBuilder` | Report Builder | Microsoft (free) |
 | `SxS` | the WS2025 `\sources\sxs` folder (for .NET 3.5 / feature payloads) | from the WS2025 ISO |
-| `SCOM` *(Phase 2)* | **System Center Operations Manager 2025** — `SCOM_2025.zip` | **Eval direct link:** `https://go.microsoft.com/fwlink/?linkid=2292308` (→ `SCOM_2025.zip`) — only needed for the deferred SCOM build |
+| `SCOM` *(Phase 2)* | **System Center Operations Manager 2025** — `SCOM_2025.zip` | **Eval:** `https://go.microsoft.com/fwlink/?linkid=2292308` (→ `SCOM_2025.zip`) — only for the deferred SCOM build |
+| Apps | 7-Zip + Notepad++ (x64 installers) | `https://www.7-zip.org/a/7z2600-x64.exe` · Notepad++ from its GitHub Releases (`npp.X.Y.Z.Installer.x64.exe`) — also auto-fetched by `Deploy-SCCMApplications.ps1` |
 
 > The earlier convenience option (a personal Dropbox zip via `Download-LabFiles.ps1`) is
 > **not portable** to another environment — its URL points at the original author's Dropbox.
@@ -408,6 +411,7 @@ Every gotcha we hit during this build is documented in `scripts/manual-fixes.md`
 - **VM can't ping host even with firewall off** — Tailscale is hijacking the lab subnet's route. Re-run `Configure-Host.ps1` (it lowers `vEthernet (Lab)` InterfaceMetric and raises the Tailscale route metric).
 - **`Web-Lgcy-Mgmt-Console` not found** — removed in WS2025; drop it from the feature list.
 - **ODBC 18 install exit 1603** — needs VC++ Redistributable 2017+. Install `vc_redist.x64.exe` first.
+- **SCCM DB initialization fails with ODBC 18.6.x** — use **ODBC Driver 18.5.x** (e.g. 18.5.2.1, `fwlink/?linkid=2335671`); 18.6.x has a known bug that breaks SCCM database setup.
 - **"Cannot convert string to Feature"** — `Install-WindowsFeature -ArgumentList (,$features)` doesn't pass an array correctly via PowerShell Direct. Inline the array inside the scriptblock instead.
 
 ---
