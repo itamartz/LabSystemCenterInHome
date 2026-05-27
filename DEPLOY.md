@@ -118,16 +118,16 @@ Place each under `Files\<Tool>\` (then stage to the host — Option A below):
 | `Base` (VHDX) | **Windows Server 2025** Eval — parent VHDX (or build one from the ISO) | **Eval page:** `https://go.microsoft.com/fwlink/?linkid=2268830` (WS2025 Evaluation Center — ISO/VHD; form-gated, not a direct file) |
 | `SQL` | **SQL Server 2019** Developer + CU32 | `https://go.microsoft.com/fwlink/?linkid=866662` → `sql2019_bootstrapper.exe`, then `…/sql2019_bootstrapper.exe /Action=Download /MediaType=ISO /MediaPath=… /Quiet` → `SQLServer2019-x64-ENU-Dev.iso`. CU32 separately from Microsoft. |
 | `SCCM` | **Configuration Manager 2509** — `ConfigMgr_2509.exe` (eval) or `MEM_Configmgr_2509.exe` (VLSC) | **Eval:** `https://go.microsoft.com/fwlink/?linkid=2350307` (→ `ConfigMgr_2509.exe`) |
-| `ADK` | **Windows ADK** | `https://go.microsoft.com/fwlink/?linkid=2271337` → `adksetup.exe` (offline: `adksetup.exe /layout <dir> /quiet`) |
-| `ADKPE` | **Windows PE add-on** for the ADK | `https://go.microsoft.com/fwlink/?linkid=2271338` → `adkwinpesetup.exe` (offline: `/layout <dir> /quiet`) |
+| `ADK` | **Windows ADK** → `adksetup.exe` (offline: `adksetup.exe /layout <dir> /quiet`) | latest `https://go.microsoft.com/fwlink/?linkid=2271337` · **pinned 26100.2454** (WS2025-matching) `https://go.microsoft.com/fwlink/?linkid=2289980` |
+| `ADKPE` | **Windows PE add-on** → `adkwinpesetup.exe` (offline: `/layout <dir> /quiet`) | latest `https://go.microsoft.com/fwlink/?linkid=2271338` · **pinned 26100.2454** `https://go.microsoft.com/fwlink/?linkid=2289981` |
 | `SSMS` | SQL Server Management Studio | `https://aka.ms/ssmsfullsetup` → `SSMS-Setup-ENU.exe` |
 | `SSRS` | `SQLServerReportingServices.exe` | `https://download.microsoft.com/download/1/a/a/1aaa9177-3578-4931-b8f3-373b24f63342/SQLServerReportingServices.exe` (also auto-downloaded by `Configure-SCCMReporting.ps1`) |
 | `ODBC18` | `msodbcsql18.msi` — **must be 18.5.x** | `https://go.microsoft.com/fwlink/?linkid=2335671` (v18.5.2.1). **Do NOT use 18.6.x — a known bug breaks SCCM DB initialization.** |
 | `WebView2` | Edge WebView2 Runtime (SCCM console) | `https://go.microsoft.com/fwlink/?linkid=2124701` → `MicrosoftEdgeWebView2RuntimeInstallerX64.exe` |
-| `SQLNCLI` | SQL Server Native Client 11 `sqlncli.msi` | Microsoft (free) |
-| `SQLCLRTypes` | SQL CLR Types | Microsoft (free) |
-| `VCRedist` | `vc_redist.x64.exe` **and** `vc_redist.x86.exe` (2015-2022) | `https://aka.ms/vs/17/release/vc_redist.x64.exe` / `.x86.exe` |
-| `ReportBuilder` | Report Builder | Microsoft (free) |
+| `SQLNCLI` | SQL Server Native Client 11 `sqlncli.msi` | Auto-downloaded by the SCCM prereq downloader `SetupDL.exe` → `SCCM-Prereqs\` (checklist step 2e) |
+| `SQLCLRTypes` | SQL CLR Types | Auto-downloaded by `SetupDL.exe` → `SCCM-Prereqs\` |
+| `VCRedist` | `vc_redist.x64.exe` **and** `vc_redist.x86.exe` (VC14 / 2015-2022) | `https://aka.ms/vc14/vc_redist.x64.exe` · `https://aka.ms/vc14/vc_redist.x86.exe` |
+| `ReportBuilder` | Report Builder | Auto-downloaded by `SetupDL.exe` → `SCCM-Prereqs\` |
 | `SxS` | the WS2025 `\sources\sxs` folder (for .NET 3.5 / feature payloads) | from the WS2025 ISO |
 | `SCOM` *(Phase 2)* | **System Center Operations Manager 2025** — `SCOM_2025.zip` | **Eval:** `https://go.microsoft.com/fwlink/?linkid=2292308` (→ `SCOM_2025.zip`) — only for the deferred SCOM build |
 | Apps | 7-Zip + Notepad++ (x64 installers) | `https://www.7-zip.org/a/7z2600-x64.exe` · Notepad++ from its GitHub Releases (`npp.X.Y.Z.Installer.x64.exe`) — also auto-fetched by `Deploy-SCCMApplications.ps1` |
@@ -152,13 +152,13 @@ Remove-PSSession $sess
 **VC++ Redistributable** can also be pulled directly on the host (it has internet):
 
 ```powershell
-# VC++ Redistributable 2015-2022 (needed for ODBC 18) — Host A has internet
+# VC++ Redistributable VC14 / 2015-2022 — x64 (needed for ODBC 18) + x86 (needed for MSOLEDBSQL).
+# Host has internet.
 Invoke-LabHost {
-  $u = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
-  $d = 'C:\HyperV-Lab\Files\VCRedist\vc_redist.x64.exe'
-  if (-not (Test-Path $d)) {
-    $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $u -OutFile $d -UseBasicParsing -TimeoutSec 300
+  $ProgressPreference = 'SilentlyContinue'
+  foreach ($a in 'x64','x86') {
+    $d = "C:\HyperV-Lab\Files\VCRedist\vc_redist.$a.exe"
+    if (-not (Test-Path $d)) { Invoke-WebRequest -Uri "https://aka.ms/vc14/vc_redist.$a.exe" -OutFile $d -UseBasicParsing -TimeoutSec 300 }
   }
 }
 ```
