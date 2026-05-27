@@ -204,12 +204,12 @@ Invoke-LabHost { & 'C:\HyperV-Lab\scripts\vms\New-A-DFSR.ps1'    -AdminPassword 
 Invoke-LabHost { & 'C:\HyperV-Lab\scripts\vms\New-A-MPDP.ps1'    -AdminPassword 'LabAdmin@2026!' }
 Invoke-LabHost { & 'C:\HyperV-Lab\scripts\vms\New-A-SQLSCCM.ps1' -AdminPassword 'LabAdmin@2026!' }
 
-# A-SCCM at 12 GB max is bigger than the host's free RAM at boot —
-# stop hermes-linux briefly to free 4 GB, then restart it once SCCM has ballooned down.
-Invoke-LabHost { Stop-VM hermes-linux -Confirm:$false }
-Invoke-LabHost { & 'C:\HyperV-Lab\scripts\vms\New-A-SCCM.ps1'    -AdminPassword 'LabAdmin@2026!' }   # -StartupGB 6 set inside the script
-Invoke-LabHost { Start-VM hermes-linux }   # safe to start once A-SCCM has ballooned down
-# (Jarvis must NEVER be stopped — that's a hard user rule.)
+# A-SCCM at 12 GB max can be bigger than the host's free RAM at boot. It is created with
+# -StartupGB 6 (set inside the script) so it boots small and grows via Dynamic Memory.
+# If the host is still short on RAM, temporarily quiesce a non-lab workload to free headroom,
+# then restore it once A-SCCM has ballooned down. NOTE: the lab tooling must never stop,
+# pause, or restart any VM it did not create — do that by hand, at the operator's discretion.
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\vms\New-A-SCCM.ps1'    -AdminPassword 'LabAdmin@2026!' }
 ```
 
 After step 5 you have **5 Phase 1 VMs running as Windows Server 2025 Datacenter** with static IPs, firewall off, WinRM open. They're not yet domain-joined.

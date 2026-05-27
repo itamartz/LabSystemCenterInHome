@@ -65,9 +65,6 @@ The lab runs on physical mini-PC hosts with a deliberately simple, isolated topo
 | Disk | ~930 GB | TBD |
 | OS | Windows 11 Pro 26200, Hyper-V enabled | Win 11 Pro / Server 2025 |
 
-> **Non-lab VMs on Host A** that the lab tooling must respect: `Jarvis` (4 GB) — **never
-> stopped**; `hermes-linux` (4 GB) — OK to stop briefly during the final large-VM boot.
-
 ---
 
 ## VM inventory

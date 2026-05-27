@@ -136,9 +136,9 @@ Applied to all post-deploy scripts. Don't write em-dashes into scripts that will
 
 ### 13. A-SCCM 12 GB max RAM doesn't fit at startup
 
-**Why:** Hyper-V Dynamic Memory uses `StartupBytes` as the boot-time allocation — it doesn't pre-emptively balloon other VMs down. With Jarvis (4 GB) + A-DC + A-SQLSCCM + A-MPDP + A-DFSR already running, there isn't 12 GB free for A-SCCM at boot. Start-VM fails with `0x800705AA` "Insufficient system resources".
+**Why:** Hyper-V Dynamic Memory uses `StartupBytes` as the boot-time allocation — it doesn't pre-emptively balloon other VMs down. With ~4–8 GB reserved for pre-existing non-lab workloads + A-DC + A-SQLSCCM + A-MPDP + A-DFSR already running, there isn't 12 GB free for A-SCCM at boot. Start-VM fails with `0x800705AA` "Insufficient system resources".
 
-**Fix:** A-SCCM is created with `-RamGB 12 -StartupGB 6` (lower startup, full 12 GB max via Dynamic Memory). Added a `-StartupGB` parameter to `New-LabVM` in `LabVMHelpers.ps1` that defaults to `$RamGB` but can be overridden. Also: stop `hermes-linux` briefly before starting A-SCCM to free another 4 GB. **Never stop `Jarvis`** (hard user rule).
+**Fix:** A-SCCM is created with `-RamGB 12 -StartupGB 6` (lower startup, full 12 GB max via Dynamic Memory). Added a `-StartupGB` parameter to `New-LabVM` in `LabVMHelpers.ps1` that defaults to `$RamGB` but can be overridden. If the host is still short on RAM, the operator may temporarily quiesce a non-lab workload before starting A-SCCM. **The lab tooling must never stop, pause, or restart any VM it did not create** (hard user rule).
 
 ### 14. `Web-Lgcy-Mgmt-Console` removed in WS2025
 

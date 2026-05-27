@@ -27,11 +27,11 @@ Remaining Phase 1 (optional): step 12 (DFSR). Phase 2 (needs Host B): SQL AG, pa
 | Domain | WORKGROUP | TBD |
 | Hyper-V | Enabled | TBD |
 
-**Existing non-lab VMs on Host A:**
-- `Jarvis` (4 GB) — **always running, never stopped**. Treat its RAM as permanently reserved.
-- `hermes-linux` (4 GB) — OK to stop briefly (a few minutes) during lab boot to free headroom, then restart. Don't leave it stopped long-term.
+**Pre-existing non-lab workloads on Host A:** Host A already runs some unrelated VMs. Treat
+their RAM as reserved — assume **~4–8 GB** is permanently spoken for and is not available to
+the lab. The lab tooling must never stop, pause, or restart any VM it did not create.
 
-Effective lab budget on Host A: `28.8 GB physical - ~3 GB OS - 4 GB Jarvis - [4 GB hermes if running] = 14-18 GB`.
+Effective lab budget on Host A: `28.8 GB physical - ~3 GB OS - ~4–8 GB reserved non-lab workloads = 14-18 GB`.
 
 ## Architecture
 
@@ -80,17 +80,17 @@ Set-VMMemory -DynamicMemoryEnabled $true `
 
 ### Boot order — Host A (Phase 1)
 
-VMs are started one at a time, **waiting ~60–90 seconds between each** so Dynamic Memory has time to balloon the just-booted VM down before the next allocation. Jarvis stays running throughout.
+VMs are started one at a time, **waiting ~60–90 seconds between each** so Dynamic Memory has time to balloon the just-booted VM down before the next allocation.
 
-| # | VM | Startup | Free after wait (hermes running) | Free after wait (hermes stopped) |
-|---|---|---|---|---|
-| 1 | A-DC | 4 GB | ~17 GB | ~21 GB |
-| 2 | A-DFSR | 4 GB | ~16 GB | ~20 GB |
-| 3 | A-MPDP | 6 GB | ~14.5 GB | ~18.5 GB |
-| 4 | A-SQLSCCM | 8 GB | ~12.5 GB | ~16.5 GB |
-| 5 | A-SCCM | 12 GB | ~0.5 GB **TIGHT** | ~4.5 GB ✓ |
+| # | VM | Startup | Free after wait |
+|---|---|---|---|
+| 1 | A-DC | 4 GB | ~17 GB |
+| 2 | A-DFSR | 4 GB | ~16 GB |
+| 3 | A-MPDP | 6 GB | ~14.5 GB |
+| 4 | A-SQLSCCM | 8 GB | ~12.5 GB |
+| 5 | A-SCCM | 12 GB | ~0.5 GB **TIGHT** |
 
-**Recommendation:** stop `hermes-linux` briefly before the final A-SCCM boot — gives a 4 GB cushion exactly when it's needed. Restart hermes-linux as soon as A-SCCM is up and ballooned down (typically 2–3 minutes). Jarvis stays running throughout — never stop it.
+**Recommendation:** A-SCCM is created with a reduced `-StartupGB 6` (boots at 6 GB, grows to 12 GB under load via Dynamic Memory) so it fits the available headroom at the final boot. If headroom is still tight, free RAM by temporarily quiescing other non-lab workloads on the host *before* starting A-SCCM, then restore them once it has ballooned down. The lab tooling must never stop, pause, or restart any VM it did not create.
 
 ### Boot order — Host B (Phase 1)
 
@@ -205,7 +205,7 @@ For guest-VM access from the host, use Hyper-V direct connect (`Invoke-Command -
 
 ### Phase 1 — Build now (or when Host B arrives)
 
-1. **Host A prep**: Configure `Lab` NAT vSwitch, create `C:\HyperV-Lab\` paths, download WS2025 Evaluation VHDX (~11 GB), download SCCM/SQL/ADK media (~18 GB — skip SCOM media for now). Run via WinRM from this PC. **Jarvis stays running throughout — never stop it.** Stop hermes-linux briefly during the final A-SCCM boot, restart it as soon as A-SCCM has ballooned down.
+1. **Host A prep**: Configure `Lab` NAT vSwitch, create `C:\HyperV-Lab\` paths, download WS2025 Evaluation VHDX (~11 GB), download SCCM/SQL/ADK media (~18 GB — skip SCOM media for now). Run via WinRM from this PC. The lab tooling must never stop, pause, or restart any pre-existing non-lab VM; if headroom is tight at the final A-SCCM boot, the operator may temporarily quiesce other non-lab workloads, then restore them once A-SCCM has ballooned down.
 2. **Host A — create Site A VMs sequentially** (no SCOM yet): A-DC → A-DFSR → A-MPDP → A-SQLSCCM → A-SCCM. Run `scripts\vms\New-A-*.ps1` one at a time. Skip `New-A-SCOM.ps1` and `New-A-SQLSCOM.ps1`.
 3. **Host B prep** (when hardware arrives): Same as Host A.
 4. **Host B — create Site B VMs sequentially**: B-DFSR → B-MPDP → B-SQLSCCM → B-SCCM (cap at 10 GB). Add cross-host AD Sites & Services site link.
@@ -224,9 +224,9 @@ Discoveries while standing up Phase 1 — encoded in scripts already, kept here 
 - **DISM in unattend FirstLogonCommands is unreliable on WS2025.** The chain processes Orders 1-7 (enough to enable WinRM) but stalls before reaching slow commands. **Solution:** do the heavy lifting via Hyper-V direct WinRM after boot. See `Convert-LabVMEdition` + `Wait-LabVMRemoting` in `LabVMHelpers.ps1`.
 - **Don't disable IPv6 in the unattend.** `DisabledComponents=255` on WS2025 leaves services bound to `[::]` in IPv6-only mode, killing TCP listeners for SMB/WinRM on IPv4. The unattend has this command removed (Order 9).
 - **Tailscale subnet-route collision:** if a Tailscale node on the network advertises `10.10.0.0/24`, on the host that route can win over `vEthernet (Lab)` (`RouteMetric 0` < `256`) and host-to-VM traffic disappears into Tailscale. **Fix** (part of `Configure-Host.ps1` step 7a): drop `vEthernet (Lab)` `InterfaceMetric` to 1 and raise the conflicting Tailscale 10.10.0.0/24 route's `RouteMetric` to 9000. Only relevant while such an overlapping advertisement exists.
-- **A-SCCM needs lower StartupBytes than MaximumBytes.** Hyper-V allocates the full `StartupBytes` at boot — it doesn't pre-emptively balloon other VMs. On a 28.8 GB host with Jarvis (4 GB), 4 idle Site A VMs and SQL holding ~8 GB just-rebooted, there isn't 12 GB to spare. **Solution** in `New-A-SCCM.ps1`: `-RamGB 12 -StartupGB 6` (boots at 6 GB, grows up to 12 GB under load via Dynamic Memory). `New-LabVM` accepts `-StartupGB` as an explicit lower-than-max override.
+- **A-SCCM needs lower StartupBytes than MaximumBytes.** Hyper-V allocates the full `StartupBytes` at boot — it doesn't pre-emptively balloon other VMs. On a 28.8 GB host with ~4–8 GB reserved for non-lab workloads, 4 idle Site A VMs and SQL holding ~8 GB just-rebooted, there isn't 12 GB to spare. **Solution** in `New-A-SCCM.ps1`: `-RamGB 12 -StartupGB 6` (boots at 6 GB, grows up to 12 GB under load via Dynamic Memory). `New-LabVM` accepts `-StartupGB` as an explicit lower-than-max override.
 - **Per-VM creation time on the new flow: ~2 minutes end-to-end** (smaller VMs). DISM `/Set-Edition` is fast (~12 sec); the bulk is OOBE + WinRM-ready wait + the conversion reboot.
-- **Boot order observation (matches plan):** A-DC → A-DFSR → A-MPDP → A-SQLSCCM → A-SCCM. For A-SCCM only: stop `hermes-linux` before starting it, restart hermes-linux after A-SCCM has ballooned down (~30 sec). **Never stop Jarvis** at any point.
+- **Boot order observation (matches plan):** A-DC → A-DFSR → A-MPDP → A-SQLSCCM → A-SCCM. For A-SCCM only, if the host is short on RAM at the final boot, the operator may temporarily quiesce a non-lab workload to free headroom, then restore it after A-SCCM has ballooned down (~30 sec). The lab tooling itself never stops VMs it did not create.
 
 ## Current Lab State (Phase 1 complete — 2026-05-23)
 
