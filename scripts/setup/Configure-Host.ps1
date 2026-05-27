@@ -15,7 +15,8 @@
       4. Create the 'Lab' Internal vSwitch if missing
       5. Assign the host IP (e.g. 10.10.0.1/24) to the vSwitch adapter
       6. Configure a NAT rule for outbound internet from VMs
-      7. Open firewall: ICMP echo + WinRM (5985) inbound on the lab subnet
+      7. Open firewall: ICMP echo + WinRM (5985) + SMB (445) inbound on the lab subnet
+      8. Create the local 'labadmin' user the VMs use to mount the media SMB share
 
 .PARAMETER Site
     'A' or 'B'. Determines which subnet/host IP is used.
@@ -54,7 +55,10 @@ param(
 
     [string]$SwitchName = 'Lab',
 
-    [string]$NatName
+    [string]$NatName,
+
+    # Local host user the lab VMs authenticate as (via cmdkey) to mount the media SMB share.
+    [string]$LabAdminPassword = 'LabAdmin@2026!'
 )
 
 Set-StrictMode -Version Latest
@@ -280,6 +284,14 @@ function Set-LabFirewallRules {
             Protocol    = 'TCP'
             LocalPort   = 5985
             IcmpType    = $null
+        },
+        @{
+            # VMs mount the media share \\<host>\LabMedia over SMB during deploy
+            Name        = "Lab-Allow-SMB-In-Site$Site"
+            DisplayName = "Lab Allow SMB In (Site $Site, 445)"
+            Protocol    = 'TCP'
+            LocalPort   = 445
+            IcmpType    = $null
         }
     )
 
@@ -307,6 +319,23 @@ function Set-LabFirewallRules {
 }
 
 # -------------------------------------------------------------------
+# Step 8 — Local 'labadmin' user for VM->host SMB share access
+# (VMs use `cmdkey /add:<host> /user:labadmin` to reach \\<host>\LabMedia)
+# -------------------------------------------------------------------
+function New-LabShareUser {
+    Write-LabLog "Step 8: Ensure local 'labadmin' user for SMB share access" -Level STEP
+    if (Get-LocalUser -Name 'labadmin' -ErrorAction SilentlyContinue) {
+        Write-LabLog "Local user 'labadmin' already present" -Level INFO
+        return
+    }
+    $pw = ConvertTo-SecureString $LabAdminPassword -AsPlainText -Force
+    New-LocalUser -Name 'labadmin' -Password $pw -PasswordNeverExpires -AccountNeverExpires `
+                  -FullName 'Lab admin (share access)' `
+                  -Description 'Used by lab VMs to mount the LabMedia SMB share' | Out-Null
+    Write-LabLog "Created local user 'labadmin'" -Level SUCCESS
+}
+
+# -------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------
 if (-not (Test-Path $StoragePath)) {
@@ -325,6 +354,7 @@ Set-LabVSwitchHostIP
 Set-LabNat
 Set-LabRouteOverride
 Set-LabFirewallRules
+New-LabShareUser
 
 Write-LabLog ('=' * 70) -Level SUCCESS
 Write-LabLog "Configure-Host.ps1 complete for Site $Site." -Level SUCCESS

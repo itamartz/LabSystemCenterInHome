@@ -16,11 +16,21 @@
   ```
 - Project cloned to a local folder (e.g. `C:\Users\you\Dropbox\System\_FORWORK\LabSystemCenterInHome`)
 
-**On the Hyper-V host (`NUCBOX_K12` @ 100.100.71.55 in this project):**
-- Windows 11 Pro 26200 (or any modern Hyper-V-capable Windows SKU)
+**On the Hyper-V host (your physical mini-PC):**
+- Windows 11 Pro (or any modern Hyper-V-capable Windows SKU)
 - Hyper-V feature enabled
 - WinRM service running, port 5985 open inbound from your PC
-- A local admin account whose creds we'll save (in this project: `homelab` user)
+- A local admin account whose creds we'll save
+
+> **First, make it your environment:** edit `lab-config.json` and set `hostA.hostname`,
+> `hostA.ip` (your host's reachable IP/FQDN), and the `defaults.*Password` values. Every
+> example below derives the host address from that file:
+> ```powershell
+> $hostIp = (Get-Content .\lab-config.json -Raw | ConvertFrom-Json).hostA.ip
+> ```
+> `Connect-LabHost.ps1` already reads `hostA.ip` automatically, so `Invoke-LabHost { ... }`
+> needs no IP. Only the raw `New-PSSession` examples below use `$hostIp`. The internal VM
+> subnet (`10.10.0.0/24`) and VM IPs are fixed by design and don't change per environment.
 
 ---
 
@@ -40,36 +50,17 @@ After this, `scripts\lib\Connect-LabHost.ps1` exposes `Invoke-LabHost { ... }` w
 
 ## 2. Configure the Hyper-V host
 
-Sets up storage paths, the `Lab` Internal vSwitch (10.10.0.0/24), NAT, firewall rules, and the **Tailscale route override** (only needed if a Tailscale node on the network advertises an overlapping `10.10.0.0/24` subnet).
+Sets up storage paths, the `Lab` Internal vSwitch (10.10.0.0/24), NAT, firewall rules
+(ICMP + WinRM + SMB), the local `labadmin` share user, and the **Tailscale route override**
+(only needed if a Tailscale node on the network advertises an overlapping `10.10.0.0/24`).
 
 ```powershell
 . .\scripts\lib\Connect-LabHost.ps1
 Invoke-LabHostScript -FilePath '.\scripts\setup\Configure-Host.ps1' -ArgumentList 'A'
 ```
 
-This is idempotent — safe to re-run.
-
-### 2a. Additional one-off host config (not yet baked into `Configure-Host.ps1`):
-
-```powershell
-Invoke-LabHost {
-  # SMB inbound rule for the lab subnet (Configure-Host opens ICMP + WinRM but not 445)
-  if (-not (Get-NetFirewallRule -Name 'Lab-Allow-SMB-In-SiteA' -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -Name 'Lab-Allow-SMB-In-SiteA' `
-                        -DisplayName 'Lab Allow SMB In (Site A, 445)' `
-                        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 `
-                        -RemoteAddress '10.10.0.0/24' -Profile Any -Enabled True | Out-Null
-  }
-
-  # Local 'labadmin' user — VMs use cmdkey to reach the SMB share as labadmin
-  if (-not (Get-LocalUser -Name 'labadmin' -ErrorAction SilentlyContinue)) {
-    $pwd = ConvertTo-SecureString 'LabAdmin@2026!' -AsPlainText -Force
-    New-LocalUser -Name 'labadmin' -Password $pwd -PasswordNeverExpires -AccountNeverExpires `
-                  -FullName 'Lab admin (share access)' `
-                  -Description 'Used by lab VMs to mount \\10.10.0.1\LabMedia' | Out-Null
-  }
-}
-```
+Idempotent — safe to re-run. (The SMB-445 firewall rule and the `labadmin` local user are
+now created by `Configure-Host.ps1` itself — no separate manual step needed.)
 
 ---
 
@@ -78,8 +69,9 @@ Invoke-LabHost {
 **Parent VHDX** (`WS2025-Eval.vhdx`, ~11 GB Datacenter eval) — copy from wherever you have it:
 
 ```powershell
+$hostIp = (Get-Content .\lab-config.json -Raw | ConvertFrom-Json).hostA.ip
 $cred = Import-Clixml '.\.secrets\hyperv-host.cred.xml'
-$sess = New-PSSession -ComputerName 100.100.71.55 -Credential $cred -Authentication Negotiate
+$sess = New-PSSession -ComputerName $hostIp -Credential $cred -Authentication Negotiate
 
 $src = 'C:\path\to\WS2025-Eval.vhdx'   # adjust to your local copy
 Copy-Item -Path $src -Destination 'C:\HyperV-Lab\Base\WS2025-Eval.vhdx' -ToSession $sess -Force
@@ -96,8 +88,9 @@ At ~5-7 MB/s over Tailscale, expect ~25-30 min for 11 GB.
 **Lab scripts** — push `scripts\vms\`, `scripts\post-deploy\`, `scripts\sccm-roles\` and `lab-config.json`:
 
 ```powershell
+$hostIp = (Get-Content .\lab-config.json -Raw | ConvertFrom-Json).hostA.ip
 $cred = Import-Clixml '.\.secrets\hyperv-host.cred.xml'
-$sess = New-PSSession -ComputerName 100.100.71.55 -Credential $cred -Authentication Negotiate
+$sess = New-PSSession -ComputerName $hostIp -Credential $cred -Authentication Negotiate
 foreach ($d in 'scripts\vms','scripts\post-deploy','scripts\sccm-roles') {
   Invoke-Command -Session $sess -ScriptBlock { param($p) New-Item -ItemType Directory -Path "C:\HyperV-Lab\$p" -Force | Out-Null } -ArgumentList $d
   Get-ChildItem $d -File | ForEach-Object {
@@ -112,24 +105,47 @@ Remove-PSSession $sess
 
 ## 4. Stage media binaries (~8 GB) for SQL/SCCM/ADK installs
 
-The `Files\<Tool>\Install-Silent.ps1` wrappers are versioned in the repo; the actual binaries are not. You need to stage them on the host. Options:
+The `Files\<Tool>\Install-Silent.ps1` wrappers are versioned in the repo; **the actual
+binaries are not** (they're gitignored). You must supply them yourself. The repo does NOT
+and cannot redistribute Microsoft media.
 
-- **Option A — Re-use an already-downloaded local media copy** (if you have one):
-  ```powershell
-  $src = 'C:\path\to\media\Files'
-  $sess = New-PSSession -ComputerName 100.100.71.55 -Credential (Import-Clixml .\.secrets\hyperv-host.cred.xml) -Authentication Negotiate
-  $dirs = 'ADK','ADKPE','ODBC18','ReportBuilder','SCCM','SQL','SQLCLRTypes','SQLNCLI','SSMS','SSRS','SxS','VCRedist','WebView2'
-  foreach ($d in $dirs) {
-    Copy-Item -Path (Join-Path $src $d '*') -Destination "C:\HyperV-Lab\Files\$d" -ToSession $sess -Recurse -Force
-  }
-  Remove-PSSession $sess
-  ```
-- **Option B — Re-download via `scripts\Download-LabFiles.ps1`** (pulls a Dropbox zip; slow but self-contained):
-  ```powershell
-  Invoke-LabHostScript -FilePath '.\scripts\Download-LabFiles.ps1'
-  ```
+### Media you must supply yourself (free eval/community sources)
 
-**Two binaries are NOT in the Dropbox zip and must be downloaded separately:**
+Place each under `Files\<Tool>\` (then stage to the host — Option A below):
+
+| Tool dir | What | Where to get it |
+|---|---|---|
+| `Base` (VHDX) | **Windows Server 2025** Eval — parent VHDX (or build one from the ISO) | Microsoft Evaluation Center |
+| `SQL` | **SQL Server 2019** Developer/Eval ISO **+ CU32** | Microsoft (SQL 2019 Developer is free) + Latest CU |
+| `SCCM` | **Configuration Manager** `MEM_Configmgr_<ver>.exe` | Microsoft **Evaluation** download (or VLSC) |
+| `ADK` + `ADKPE` | **Windows ADK** + **WinPE add-on** (matching the OS) | Microsoft (free) |
+| `SSMS` | SQL Server Management Studio | Microsoft (free) |
+| `SSRS` | `SQLServerReportingServices.exe` (SSRS 2022) | Microsoft (free) — also auto-downloaded by `Configure-SCCMReporting.ps1` |
+| `ODBC18` | `msodbcsql18.msi` | Microsoft (free) |
+| `SQLNCLI` | SQL Server Native Client 11 `sqlncli.msi` | Microsoft (free) |
+| `SQLCLRTypes` | SQL CLR Types | Microsoft (free) |
+| `VCRedist` | `vc_redist.x64.exe` **and** `vc_redist.x86.exe` (2015-2022) | `https://aka.ms/vs/17/release/vc_redist.x64.exe` / `.x86.exe` |
+| `ReportBuilder` | Report Builder | Microsoft (free) |
+| `SxS` | the WS2025 `\sources\sxs` folder (for .NET 3.5 / feature payloads) | from the WS2025 ISO |
+
+> The earlier convenience option (a personal Dropbox zip via `Download-LabFiles.ps1`) is
+> **not portable** to another environment — its URL points at the original author's Dropbox.
+> Gather the media above instead.
+
+### Stage the gathered media to the host
+
+```powershell
+$hostIp = (Get-Content .\lab-config.json -Raw | ConvertFrom-Json).hostA.ip
+$src = 'C:\path\to\media\Files'   # your local Files\ folder, populated per the table above
+$sess = New-PSSession -ComputerName $hostIp -Credential (Import-Clixml .\.secrets\hyperv-host.cred.xml) -Authentication Negotiate
+$dirs = 'ADK','ADKPE','ODBC18','ReportBuilder','SCCM','SQL','SQLCLRTypes','SQLNCLI','SSMS','SSRS','SxS','VCRedist','WebView2'
+foreach ($d in $dirs) {
+  Copy-Item -Path (Join-Path $src $d '*') -Destination "C:\HyperV-Lab\Files\$d" -ToSession $sess -Recurse -Force
+}
+Remove-PSSession $sess
+```
+
+**VC++ Redistributable** can also be pulled directly on the host (it has internet):
 
 ```powershell
 # VC++ Redistributable 2015-2022 (needed for ODBC 18) — Host A has internet
@@ -143,7 +159,7 @@ Invoke-LabHost {
 }
 ```
 
-`MEM_Configmgr_<version>.exe` for SCCM Current Branch must be downloaded from the Microsoft 365 Admin Center (Volume Licensing → Downloads) and placed at `C:\HyperV-Lab\Files\SCCM\MEM_Configmgr_2509.exe` (or current). It then needs extracting before step 7's AD schema extension can find `extadsch.exe`:
+`MEM_Configmgr_<version>.exe` for SCCM Current Branch is available from the **Microsoft Evaluation Center** (free 180-day eval) or VLSC/M365 Admin Center. Place it at `C:\HyperV-Lab\Files\SCCM\MEM_Configmgr_2509.exe` (or current version). It then needs extracting before step 7's AD schema extension can find `extadsch.exe`:
 
 ```powershell
 Invoke-LabHost {
@@ -233,16 +249,113 @@ Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\07-Install-SCCM-Prerequisi
 Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\08-Install-SCCM-Primary.ps1' -AdminPassword 'LabAdmin@2026!' -DomainAdminPassword 'LabAdmin@2026!' -DSRMPassword 'LabAdmin@2026!' -LocalCred $using:LocalCred -DomainCred $using:DomainCred }
 ```
 
-**Skipped for Phase 1:**
+After step 8 you have a working **SCCM Primary site**. The full lab configuration (MP/DP,
+discovery, updates, PKI, etc.) follows in **section 7** below.
+
+**Deferred to Phase 2 (need Host B):**
 - Step 9 (SQL Always On AG) — needs Host B's SQL secondary
 - Step 10 (SCCM passive node) — needs B-SCCM
-- Step 11 (SCCM MP + DP roles on A-MPDP) — out of current goal scope
 - Step 12 (DFS-R) — single-site, no replica yet
 - Steps 13, 14 (SCOM) — Phase 2
 
+> Note: the legacy `11-Install-SCCM-Roles.ps1` is superseded by `Configure-SCCMRoles.ps1`
+> (DSC-backed) in section 7.
+
 ---
 
-## 7. Verify
+## 7. Configure SCCM — the full lab
+
+Run these from your PC after step 8 (they use `Invoke-LabRemote` and execute on the host).
+**All are idempotent** (DSC `Test`→`Set`, or `Get-CM*` checks) and take `-DomainAdminPassword`.
+**Order matters where noted** — the three hard dependencies:
+> the **CA** (stood up by the reporting step) must exist **before** the SUP's SSL and before
+> client PKI · the **SUP must finish syncing** before the ADR · the **SCP** must exist before
+> installing in-console site updates.
+
+Full per-script detail + every gotcha is in `CLAUDE.md` (the matching `## SCCM …` sections).
+Throughout, `$pw = 'LabAdmin@2026!'` (= `lab-config.json` `defaults.domainAdminPassword`).
+
+### 7.1 RBAC + site-server rights  (prereq: lets `A-SCCM$` push roles/clients)
+```powershell
+. .\scripts\lib\Connect-LabHost.ps1
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMRBAC.ps1'             -DomainAdminPassword 'LabAdmin@2026!' }
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMSiteServerRights.ps1' -DomainAdminPassword 'LabAdmin@2026!' }
+# A-SCCM must REBOOT to pick up its SCCM_Site_Servers group SID (manual-fixes #23), then wait for SMS_EXECUTIVE:
+Invoke-LabHost { Restart-VM -Name 'A-SCCM' -Force }
+```
+
+### 7.2 Discovery + boundaries
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMDiscovery.ps1'  -DomainAdminPassword 'LabAdmin@2026!' }
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMBoundaries.ps1' -DomainAdminPassword 'LabAdmin@2026!' }   # creates BG-Site-A (needed by the DP join next)
+```
+
+### 7.3 Management Point + Distribution Point
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMRoles.ps1' -DomainAdminPassword 'LabAdmin@2026!' }
+# DP install is async (~5-15 min); re-run to converge. If content sticks at 2302, see CLAUDE.md (RefreshNow).
+```
+
+### 7.4 Client push + collection + client settings + apps
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMClientPush.ps1'     -DomainAdminPassword 'LabAdmin@2026!' }
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMCollections.ps1'    -DomainAdminPassword 'LabAdmin@2026!' }   # 'All Servers'
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMClientSettings.ps1' -DomainAdminPassword 'LabAdmin@2026!' }
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Deploy-SCCMApplications.ps1'      -DomainAdminPassword 'LabAdmin@2026!' }   # 7-Zip + Notepad++
+```
+
+### 7.5 Reporting + the domain CA  (**stands up `SADAB-Root-CA` — gate for 7.6 SSL and 7.10 PKI**)
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMReporting.ps1' -DomainAdminPassword 'LabAdmin@2026!' }
+```
+
+### 7.6 Software Update Point over HTTPS/8531 + sync
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMSoftwareUpdatePoint.ps1' -Stage All -DomainAdminPassword 'LabAdmin@2026!' }
+```
+> **Gotcha (encoded in the script + CLAUDE.md):** the SCCM-driven WSUS category sync **times
+> out at ~15 min** on this hardware and only lands a seed catalog. To fully populate, run a
+> **WSUS-direct sync** on A-MPDP — `(Get-WsusServer).GetSubscription().StartSynchronization()`
+> (async; wait for `Succeeded`) — then select products and full-sync:
+> ```powershell
+> Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMSoftwareUpdatePoint.ps1' -Stage Products -DomainAdminPassword 'LabAdmin@2026!' }
+> # poll until updates appear:
+> Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMSoftwareUpdatePoint.ps1' -Stage Status   -DomainAdminPassword 'LabAdmin@2026!' }
+> ```
+> Products must be selected **in WSUS** before the update-metadata sync pulls actual updates.
+
+### 7.7 ADR (and optionally a specific update) → All Servers, Required
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Deploy-SCCMUpdatesADR.ps1' -Stage Create -DomainAdminPassword 'LabAdmin@2026!' }
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Deploy-SCCMUpdatesADR.ps1' -Stage Run    -DomainAdminPassword 'LabAdmin@2026!' }   # downloads content, deploys
+# optional — deploy one specific KB Required to All Servers:
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Deploy-SCCMUpdateToCollection.ps1' -ArticleId 5087539 -DomainAdminPassword 'LabAdmin@2026!' }
+```
+
+### 7.8 Service Connection Point (Online)
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMServiceConnectionPoint.ps1' -DomainAdminPassword 'LabAdmin@2026!' }
+```
+
+### 7.9 In-console site update (needs the SCP)
+The SCP fetches the update **list** but not the payload — download it first, then install:
+```powershell
+# (download the in-console update so EasySetupPayload\<guid> is populated, then:)
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Install-SCCMSiteUpdate.ps1' -DomainAdminPassword 'LabAdmin@2026!' }
+# Verify by the component binary version (cmupdate.exe → e.g. 5.00.9141.1030) + Update History — the
+# base Get-CMSite.Version stays at the baseline for a hotfix rollup (see CLAUDE.md).
+```
+
+### 7.10 Client PKI / HTTPS  (do LAST — flips the MP to HTTPS)
+```powershell
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMClientPKI.ps1' -Stage All -DomainAdminPassword 'LabAdmin@2026!' }
+# verify a client selects its PKI cert and reaches the MP over HTTPS:
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\Configure-SCCMClientPKI.ps1' -Stage Verify -ClientVM A-DFSR -DomainAdminPassword 'LabAdmin@2026!' }
+```
+
+---
+
+## 8. Verify
 
 ```powershell
 # All Phase 1 VMs running and in the domain
@@ -300,17 +413,21 @@ Every gotcha we hit during this build is documented in `scripts/manual-fixes.md`
 ## File map
 
 ```
-scripts\setup\Configure-Host.ps1          host plumbing: paths, vSwitch, NAT, route override, firewall
-scripts\lib\Connect-LabHost.ps1           Invoke-LabHost / Invoke-LabHostScript / Invoke-LabVM helpers
+scripts\setup\Configure-Host.ps1          host plumbing: paths, vSwitch, NAT, route override, firewall (ICMP/WinRM/SMB), labadmin user
+scripts\lib\Connect-LabHost.ps1           Invoke-LabHost / Invoke-LabHostScript / Invoke-LabVM helpers (reads hostA.ip from lab-config.json)
 scripts\vms\New-A-*.ps1                   per-VM creation (one wrapper per VM)
 scripts\vms\LabVMHelpers.ps1              New-LabVM, Convert-LabVMEdition, Wait-LabVMRemoting
-scripts\post-deploy\01-14*.ps1            orchestrated post-deploy steps (1=share, 2=DC, 3=AD, 4=Sites, 5=join, 6=SQL, 7=prereqs, 8=Primary, 11=MP/DP, 12=DFSR)
-scripts\post-deploy\LabHelpers.psm1       $Global:LabConfig, Write-LabLog, Invoke-LabRemote (with Hyper-V direct preference), Wait-LabVMReady
-scripts\post-deploy\Invoke-LabDeploy.ps1  orchestrator that chains the 14 steps (we invoke individual steps directly during build)
-scripts\sccm-roles\*.ps1                  MP / DP / SUP role configs (Phase 1 with MP/DP scope only)
-Files\<Tool>\Install-Silent.ps1           silent-install wrappers (binaries fetched separately)
-lab-config.json                           host IPs, paths, domain name, SCCM site code
-CLAUDE.md                                 live reference doc (state, conventions, design decisions)
+scripts\post-deploy\NN-*.ps1 (01-08)      base post-deploy steps used here (1=share, 2=DC, 3=AD, 4=Sites, 5=join, 6=SQL, 7=prereqs, 8=Primary); 09-14 are Phase-2/legacy
+scripts\post-deploy\Configure-*.ps1       SCCM config (section 7): Roles(MP/DP), Discovery, Boundaries, Collections, ClientPush, ClientSettings, RBAC, SiteServerRights, Reporting, SoftwareUpdatePoint, ServiceConnectionPoint, ClientPKI
+scripts\post-deploy\Deploy-*.ps1          Applications, UpdatesADR, UpdateToCollection
+scripts\post-deploy\Install-SCCMSiteUpdate.ps1   in-console site update (Updates and Servicing)
+scripts\post-deploy\Verify-SCCMUpdatesOnClient.ps1   client-side update scan/install verification
+scripts\post-deploy\LabHelpers.psm1       $Global:LabConfig, Write-LabLog, Invoke-LabRemote (Hyper-V direct preference), Wait-LabVMReady
+scripts\post-deploy\Invoke-LabDeploy.ps1  orchestrator that chains the base 14 steps
+scripts\sccm-roles\*.ps1                  manual MP / DP / SUP role helpers (the Configure-* DSC scripts are preferred)
+Files\<Tool>\Install-Silent.ps1           silent-install wrappers (binaries supplied separately — see section 4)
+lab-config.json                           host IP/hostname, paths, domain name, SCCM site code, lab default creds
+CLAUDE.md                                 live reference doc (state, conventions, design decisions, every SCCM gotcha)
 DEPLOY.md                                 this file — from-scratch build procedure
 scripts\manual-fixes.md                   every gotcha and one-off command we hit
 ```
