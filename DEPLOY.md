@@ -115,7 +115,7 @@ Place each under `Files\<Tool>\` (then stage to the host — Option A below):
 
 | Tool dir | What | Where to get it |
 |---|---|---|
-| `Base` (VHDX) | **Windows Server 2025** Eval — parent VHDX (or build one from the ISO) | Microsoft Evaluation Center |
+| `Base` (VHDX) | **Windows Server 2025** Eval — parent VHDX (or build one from the ISO) | **Eval page:** `https://go.microsoft.com/fwlink/?linkid=2268830` (WS2025 Evaluation Center — ISO/VHD; form-gated, not a direct file) |
 | `SQL` | **SQL Server 2019** Developer/Eval ISO **+ CU32** | Microsoft (SQL 2019 Developer is free) + Latest CU |
 | `SCCM` | **Configuration Manager 2509** — `ConfigMgr_2509.exe` (eval) or `MEM_Configmgr_2509.exe` (VLSC) | **Eval direct link:** `https://go.microsoft.com/fwlink/?linkid=2350307` (→ `ConfigMgr_2509.exe`) |
 | `ADK` + `ADKPE` | **Windows ADK** + **WinPE add-on** (matching the OS) | Microsoft (free) |
