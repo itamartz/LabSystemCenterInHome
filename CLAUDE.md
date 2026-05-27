@@ -129,7 +129,7 @@ Versions are pinned in the install scripts. Don't change without updating both t
 |---|---|---|
 | Guest OS (parent VHDX) | Windows Server 2025 Eval (Datacenter) → auto-converted to **Datacenter** on first boot | `C:\HyperV-Lab\Base\WS2025-Eval.vhdx`, downloaded by `Download-LabFiles.ps1`. Each VM runs DISM `/Set-Edition:ServerDatacenter` with KMS key `D764K-2NDRG-47T6Q-P8T8W-YP6DF` via unattend FirstLogonCommands (orders 11-12) then reboots — escapes the Eval hourly-shutdown behavior. |
 | Host OS | Windows 11 Pro 26200 | Existing on NUCBOX_K12 |
-| SQL Server | **2019 Developer + CU32** | `scripts\post-deploy\06-Install-SQL.ps1` — ISO extracted with 7-Zip, applied via `/UPDATESOURCE` |
+| SQL Server | **2019 Developer + CU32 (KB5068404)** | `scripts\post-deploy\06-Install-SQL.ps1` — ISO extracted with 7-Zip; CU applied as a standalone patch (first `SQLServer2019-KB*.exe` in the SQL media folder, `/Action=Patch`) |
 | SQL collation | `SQL_Latin1_General_CP1_CI_AS` | Set in ConfigurationFile.ini in step 06 |
 | SSMS | Latest (silent install) | `Files\SSMS\Install-Silent.ps1` |
 | SCCM | Current Branch | `scripts\post-deploy\08-Install-SCCM-Primary.ps1`, site code PR1 |
