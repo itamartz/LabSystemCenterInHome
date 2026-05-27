@@ -32,6 +32,13 @@
 > needs no IP. Only the raw `New-PSSession` examples below use `$hostIp`. The internal VM
 > subnet (`10.10.0.0/24`) and VM IPs are fixed by design and don't change per environment.
 
+> **Internet + auto-installed modules:** the VMs reach the internet through the host's NAT
+> switch, and the config scripts **auto-install their DSC/PowerShell modules from PSGallery**
+> at runtime — `ConfigMgrCBDsc`, `SqlServerDsc 15.2.0`, `SqlServer 21.x`, `CertificateDsc`,
+> `ActiveDirectoryDsc`, `ActiveDirectoryCSDsc` (version pins matter — see CLAUDE.md gotchas).
+> So the lab assumes internet access during the build. For a fully air-gapped rebuild you'd
+> pre-stage those modules (and all media) instead.
+
 ---
 
 ## 1. Save host credentials locally (one-time)
@@ -66,7 +73,12 @@ now created by `Configure-Host.ps1` itself — no separate manual step needed.)
 
 ## 3. Stage the parent VHDX and lab scripts on the host
 
-**Parent VHDX** (`WS2025-Eval.vhdx`, ~11 GB Datacenter eval) — copy from wherever you have it:
+**Parent VHDX** (`WS2025-Eval.vhdx`, ~11 GB Datacenter eval). **To obtain it:** from the
+WS2025 Evaluation Center (`fwlink/?linkid=2268830`) download the **VHD** option and rename it
+to `WS2025-Eval.vhdx` — *or* download the **ISO** and build a VHDX from it (e.g. with
+`Convert-WindowsImage`, or create a VM, install WS2025 to a dynamic VHDX, sysprep/generalize,
+shut down). The VMs are created as **differencing disks** off this read-only parent, so it
+only needs to exist once. Then copy it to the host:
 
 ```powershell
 $hostIp = (Get-Content .\lab-config.json -Raw | ConvertFrom-Json).hostA.ip
@@ -83,7 +95,7 @@ Invoke-Command -Session $sess -ScriptBlock {
 Remove-PSSession $sess
 ```
 
-At ~5-7 MB/s over Tailscale, expect ~25-30 min for 11 GB.
+(Large file — transfer time depends on your link to the host.)
 
 **Lab scripts** — push `scripts\vms\`, `scripts\post-deploy\`, `scripts\sccm-roles\` and `lab-config.json`:
 
