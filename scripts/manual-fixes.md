@@ -864,26 +864,81 @@ Invoke-LabVM -VMName 'A-SCCM' -UseDomainCredential -ScriptBlock {
 }
 ```
 
-### How to clear it (resolution)
+### Important clarification on AvailabilityState=4
 
-The fix is to make Site Component Manager **de-register the orphaned SMS Component Server role**
-on A-SQLSCCM so the box is monitored only as `SMS SQL Server` (which is checked via SQL, not
-the failing registry pull). Cleanest route: **re-enable the Backup SMS Site Server task, let it
-install cleanly, then disable it again** so SCM runs a proper uninstall of `SMS_SITE_SQL_BACKUP`
-and drops the component-server role. After SCM reconciles (watch `sitecomp.log`), the
-summarizer stops polling A-SQLSCCM as a component server and the Critical clears. Alternative:
-re-enable the task and keep it (a properly-configured, running backup component reports
-AvailabilityState 0 and goes green). Leaving it as-is is also defensible in a lab - the alert
-is a cosmetic false-positive; nothing is actually broken.
-**(Resolution not yet applied - pending decision on whether to re-enable site backup.)**
+The fresh `sitestat.log` (after SMS_EXECUTIVE restart) revealed that **AvailabilityState=4 is
+normal**, not a fault marker. It appears for the "SMS Component Server" role on A-MPDP and the
+"SMS Site Server" role on A-SCCM too - and both of those boxes show **green** in Site Status.
+The summarizer logs lines like `Availability State on server A-MPDP.SADAB.PRI for role SMS
+Component Server is 4` for healthy systems. The site system stays OK because **at least one
+other role on that box reports AvailabilityState=0** via a `.SUM` heartbeat push (e.g. A-MPDP's
+SMS Software Update Point pushes `Updating its AvailabilityStat to 0`; A-SCCM's SMS Dmp
+Connector and SMS SRS Reporting Point push 0). For A-SQLSCCM, both polled roles (`SMS Component
+Server` and `SMS SQL Server`) **fail with error 5 instead of returning a value** - so no role
+ever reports a number the summarizer can use, and the box stays Critical.
+
+The differentiator is therefore not "AvailabilityState=4" - it is "**the read fails entirely**".
+
+### Resolution attempts (both verified UNSUCCESSFUL)
+
+Two fixes were tried in this session. Neither cleared the Critical:
+
+**Attempt 1 - enable the Backup SMS Site Server task (Option 2 from the discussion):**
+- Created `C:\Backups\SiteServer` on A-SCCM (100 GB drive) and `C:\Backups\SqlBackup` on
+  A-SQLSCCM (granted `Modify` to the SQL gMSA `SADAB\A-gMSA$`).
+- `Set-CMSiteMaintenanceTask -SiteCode PR1 -Name 'Backup SMS Site Server' -Enabled $true
+   -DaysOfWeek Sunday -BeginTime 0 -LatestBeginTime 500 -SiteBackupPath C:\Backups\SiteServer
+   -SqlBackupPath C:\Backups\SqlBackup` (the cmdlet requires Site+SQL paths together; you
+  cannot mix `-DeviceName` with `-SiteBackupPath`).
+- `Restart-Service SMS_EXECUTIVE` on A-SCCM, waited 90s. Result: **still Critical**. SCM does
+  NOT pre-provision A-SQLSCCM as a full component server just because the task is enabled - a
+  backup has to actually RUN before SCM does the proper install. The Sunday schedule may or
+  may not flip it green once it fires (TBD). `smsbkup.log` did not yet exist after the enable.
+  `-RunNow` could not be combined with `-Name` (parameter set conflict on this build), so
+  forcing an immediate run inline was not possible.
+- **Decision: kept the backup task enabled** - even if the Critical persists, the lab gains a
+  real scheduled site backup, which is independently valuable.
+
+**Attempt 2 - manually create the missing `Identification` registry key on A-SQLSCCM:**
+- Created `HKLM:\SOFTWARE\Microsoft\SMS\Identification` with all 10 values copied from A-MPDP
+  (Site Code=PR1, Site Server=A-SCCM.sadab.pri, Site ID, Site Type/Number, Site Servers,
+  Installation Directory=`C:\SMS_A-SCCM.SADAB.PRI`, etc).
+- Restarted SMS_EXECUTIVE, waited 90s. Result: **still Critical**, sitestat.log still logs
+  `omGetServerRoleAvailabilityState could not read from the registry on A-SQLSCCM; error = 5`.
+  So `Identification` is NOT what `omGetServerRoleAvailabilityState` is trying to read - the
+  function reads some other key/value that we did not pin down without source access.
+- **Decision: reverted** - deleted the manually-added Identification key (no lasting registry
+  changes on A-SQLSCCM).
+
+### Final state (accepted)
+
+- **Backup SMS Site Server: ENABLED**, Sunday 00:00 - 05:00, paths
+  `C:\Backups\SiteServer` (A-SCCM) and `C:\Backups\SqlBackup` (A-SQLSCCM, gMSA-writable).
+- **Identification key on A-SQLSCCM: not present** (reverted to baseline).
+- **Site Status: Critical on A-SQLSCCM persists**, accepted as a cosmetic monitoring
+  false-positive. The actual `SMS_SITE_SQL_BACKUP` component is healthy (current heartbeat,
+  Availability State=0); disk space is fine; the only effect of the red icon is the icon
+  itself. Re-evaluate after Sunday's backup actually runs - if SCM provisions A-SQLSCCM fully
+  during the backup, it may flip green; otherwise leave it.
 
 ### Lesson learned
 
 A Site Status **Critical with an empty "Show Messages" window** is a `SMS_SiteSystemSummarizer`
-state, not a logged error - **diagnose from `sitestat.log`, not the message viewer**, and note
-that **neither Reset Counts nor restarting SMS_EXECUTIVE clears it**. When the row shows
-`AvailabilityState <> 0` but storage is fine and the underlying component is healthy, suspect a
-**role the summarizer must poll but can't** - very often an **orphaned role** (here: an
-SMS Component Server left behind by a Backup task that was enabled once and later disabled).
-Confirm with `SMS_SCI_SysResUse` (which roles the site thinks the box has) vs the actual
-`Operations Management\Components` subkeys on the box.
+state, not a logged error - **diagnose from `sitestat.log`, not the message viewer**.
+**Neither Reset Counts nor restarting SMS_EXECUTIVE clears it**, because Reset Counts targets
+the wrong summarizer and `SMS_SiteSystemSummarizer` has no reset method. The diagnostic
+pyramid:
+
+1. **`AvailabilityState=4` alone is not a fault** - it appears on healthy systems too. The
+   marker of a real problem is `omGetServerRoleAvailabilityState ... error = 5` lines in
+   `sitestat.log` for that specific system.
+2. **Storage, ACLs, RemoteRegistry, machine-account token - rule them out one by one with
+   targeted tests**. They are usually not the cause when the same machine account works fine
+   for other site systems.
+3. **An orphaned role from a once-enabled-then-disabled feature (here: the Backup task)** on a
+   server with an **incomplete SMS footprint** (no Identification key, no MP/Setup/etc keys
+   that a real component server has) is a known failure mode where the summarizer can't poll
+   role availability. Cleanly fixing this requires either (a) a successful real backup run that
+   forces SCM to fully provision the box, or (b) decoding `smsexec.exe` to find the exact
+   registry value the read needs - neither is worth doing for a cosmetic false-positive in a
+   lab. Accept-and-move-on is defensible.
