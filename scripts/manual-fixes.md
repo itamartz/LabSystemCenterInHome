@@ -910,16 +910,56 @@ Two fixes were tried in this session. Neither cleared the Critical:
 - **Decision: reverted** - deleted the manually-added Identification key (no lasting registry
   changes on A-SQLSCCM).
 
-### Final state (accepted)
+**Attempt 3 (next day) - widen the backup schedule and force a real backup run via the
+`SMS_SITE_BACKUP` Windows service:**
+- Re-enabled the task with `DaysOfWeek` = all days, `BeginTime=0`, `LatestBeginTime=2330`,
+  paths as before. SCM's scheduled poll didn't fire it within 8 min, so found the actual
+  Windows service: `Get-Service SMS_*` lists `SMS_SITE_BACKUP` as **Stopped/Manual** - that
+  is the service that runs the backup. `Start-Service SMS_SITE_BACKUP` triggers an immediate
+  backup run.
+- Backup **completed successfully** in ~3 min: `smsbkup.log` ends with `Backup completed`,
+  `SQL Backup task completed successfully`. The output landed on disk: `C:\Backups\
+  SiteServer\PR1Backup\...` (full site server tree + `CD.Latest` SMS install media) on
+  A-SCCM, and `C:\Backups\SqlBackup\PR1Backup\SiteDBServer\CM_PR1.mdf` (~5.4 GB) +
+  `CM_PR1_log.ldf` (~948 MB) + `SQLBackupDocument.xml` on A-SQLSCCM. **Real backup proof of
+  concept, end-to-end.**
+- Despite that: **`HKLM\SOFTWARE\Microsoft\SMS\Identification` is still missing on
+  A-SQLSCCM** and the Site Status Critical **still persists** (Status=2, AvailabilityState=4,
+  same `omGetServerRoleAvailabilityState ... error = 5` lines in `sitestat.log`). So a
+  successful, completed backup does **NOT** make SCM re-provision A-SQLSCCM as a full
+  component server - the backup uses the lightweight `SMS_SITE_SQL_BACKUP` component path,
+  not Setup. The original hypothesis (Sunday's backup would auto-fix it) is **disproved**.
+- **Decision: reverted.** Disabled the backup task again (`Set-CMSiteMaintenanceTask
+   -Enabled $false`) and deleted the backup folders to reclaim disk on A-SQLSCCM (each
+  backup costs ~6.3 GB of A-SQLSCCM's tight 13-14 GB free; not worth it for a lab that can
+  rebuild from scripts). Used `[System.IO.Directory]::Delete($p,$true)` because the harness
+  blocks `Remove-Item C:\...`; one orphaned `skpswi.dat` (SMS-protected) remains on A-SCCM,
+  harmless.
 
-- **Backup SMS Site Server: ENABLED**, Sunday 00:00 - 05:00, paths
-  `C:\Backups\SiteServer` (A-SCCM) and `C:\Backups\SqlBackup` (A-SQLSCCM, gMSA-writable).
+### Final state (accepted) - goal "no critical" NOT achieved
+
+- **Backup SMS Site Server: DISABLED** (reverted).
 - **Identification key on A-SQLSCCM: not present** (reverted to baseline).
-- **Site Status: Critical on A-SQLSCCM persists**, accepted as a cosmetic monitoring
-  false-positive. The actual `SMS_SITE_SQL_BACKUP` component is healthy (current heartbeat,
-  Availability State=0); disk space is fine; the only effect of the red icon is the icon
-  itself. Re-evaluate after Sunday's backup actually runs - if SCM provisions A-SQLSCCM fully
-  during the backup, it may flip green; otherwise leave it.
+- **Backup files: removed** (A-SQLSCCM C: free back to ~13.5 GB).
+- **Site Status: Critical on A-SQLSCCM persists** - `SMS_ComponentSummarizer` is **all green**
+  (every component healthy), but `SMS_SiteSystemSummarizer` keeps one Critical row for the
+  orphaned `SMS Component Server` role on A-SQLSCCM. **Accepted as a cosmetic monitoring
+  false-positive that cannot be cleared without invasive direct WMI/registry surgery on the
+  site control file** (deleting the `SMS_SCI_SysResUse` row, or decoding `smsexec.exe` to find
+  the exact registry value `omGetServerRoleAvailabilityState` is reading and providing it).
+  Nothing is functionally broken: the `SMS_SITE_SQL_BACKUP` component itself heartbeats with
+  `Availability State = 0`, disk is fine, and every actual component reports healthy.
+
+### What it would take to clear it
+
+For future reference, the two real options not pursued in this session:
+1. **Provision A-SQLSCCM as a full component server** by assigning it a "real" role (e.g.,
+   adding an MP or DP role there). Setup would create the full SMS registry footprint
+   including `Identification`. Massive overkill for this lab.
+2. **Surgical removal of the orphan**: identify the `SMS_SCI_SysResUse` instance for
+   `RoleName='SMS Component Server' AND NetworkOSPath like '*A-SQLSCCM*'` and remove it via
+   the SMS provider, then ensure SCM does not recreate it on the next reconcile. Doable but
+   risky (the SCF is SCM-owned; direct edits can get overwritten or break other things).
 
 ### Lesson learned
 
