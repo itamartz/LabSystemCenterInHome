@@ -10,15 +10,14 @@
         "siteSubnet": "10.10.0.0/24"
     },
     "hostB": {
-        "hostname": null,
-        "ip": null,
-        "ramGB": null,
-        "cpus": null,
-        "diskGB": null,
+        "hostname": "MS-A2",
+        "ip": "100.117.142.13",
+        "ramGB": 29.7,
+        "cpus": 32,
+        "diskGB": 951.6,
         "vSwitch": "Lab",
         "vSwitchHostIP": "10.20.0.1",
-        "siteSubnet": "10.20.0.0/24",
-        "_comment": "Filled in when host #2 arrives"
+        "siteSubnet": "10.20.0.0/24"
     },
     "paths": {
         "labRoot": "C:\\HyperV-Lab",

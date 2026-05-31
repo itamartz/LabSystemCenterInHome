@@ -257,10 +257,13 @@ function Set-LabRouteOverride {
     # 4. Verify the kernel picks our route
     $best = Find-NetRoute -RemoteIPAddress ("$SiteSubnetPrefix.2") -ErrorAction SilentlyContinue |
             Where-Object { $_.AddressFamily -eq 'IPv4' } | Select-Object -First 1
-    if ($best -and $best.InterfaceAlias -eq "vEthernet ($SwitchName)") {
+    # Defensive property access — Find-NetRoute can return objects lacking InterfaceAlias
+    # under StrictMode (e.g., when only the resolution wrapper comes back), so use PSObject.
+    $bestAlias = if ($best) { ($best.PSObject.Properties['InterfaceAlias']).Value } else { $null }
+    if ($bestAlias -eq "vEthernet ($SwitchName)") {
         Write-LabLog "Verified: best route to ${SiteSubnetPrefix}.2 = vEthernet ($SwitchName)" -Level SUCCESS
     } else {
-        Write-LabLog "WARN: best route for ${SiteSubnetPrefix}.2 went to '$($best.InterfaceAlias)' - check Tailscale state" -Level WARN
+        Write-LabLog "WARN: best route for ${SiteSubnetPrefix}.2 went to '$bestAlias' - check Tailscale state" -Level WARN
     }
 }
 

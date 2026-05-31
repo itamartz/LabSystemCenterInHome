@@ -1039,3 +1039,192 @@ pyramid:
    forces SCM to fully provision the box, or (b) decoding `smsexec.exe` to find the exact
    registry value the read needs - neither is worth doing for a cosmetic false-positive in a
    lab. Accept-and-move-on is defensible.
+
+---
+
+## 2026-05-31: Phase 2 - Host B (`MS-A2`) onboarding + cross-site networking investigation
+
+The new second host arrived. **Scope pivot:** original CLAUDE.md plan was HA (passive SCCM,
+SQL AG, cross-site DFSR). New scope is **multi-product**: Site B hosts the SCOM stack +
+extension SCCM Management Point. Dropped from original: B-SCCM passive, B-SQLSCCM AG
+secondary, B-DFSR, SQL AG, cross-site DFSR. Added: B-SCOMMS (SCOM MS) + B-SQLSCOM (SQL for
+SCOM). B-MPDP kept (SCCM MP+DP for Site B clients).
+
+| VM | IP | Role | RAM (max) | Startup | vCPU |
+|---|---|---|---|---|---|
+| B-MPDP    | 10.20.0.5  | SCCM MP + DP             | 6 GB | 6 GB | 2 |
+| B-SQLSCOM | 10.20.0.41 | SQL 2019 for SCOM        | 8 GB | 6 GB | 4 |
+| B-SCOMMS  | 10.20.0.40 | SCOM Management Server   | 6 GB | 4 GB | 4 |
+
+Host B spec: Win 11 Pro 26100, 32 logical cores, 29.7 GB RAM, 951 GB disk, clean slate
+(no existing VMs to protect, unlike Host A). `lab-config.json` `hostB.*` populated.
+
+### 1. `Configure-Host.ps1` bug: StrictMode + missing `InterfaceAlias` property
+
+**Symptom (only on Host B's first run):** Step 7a's Tailscale-vs-LAN verify block dies with
+`PropertyNotFoundException: The property 'InterfaceAlias' cannot be found on this object` at:
+```powershell
+$best = Find-NetRoute -RemoteIPAddress "$SiteSubnetPrefix.2" | Where AddressFamily -eq IPv4 | Select -First 1
+if ($best -and $best.InterfaceAlias -eq ...)
+```
+
+**Why it worked on Host A but not Host B:** `Find-NetRoute` returns objects whose property
+set varies by network state - on a host with no prior route to the target, the wrapper object
+lacks `InterfaceAlias`. With `Set-StrictMode -Version Latest`, property access on a missing
+property throws even inside an `-and` clause (PowerShell still type-checks the property name
+before short-circuit).
+
+**Fix** (baked in): defensive `PSObject.Properties['InterfaceAlias'].Value` lookup before
+comparing:
+```powershell
+$bestAlias = if ($best) { ($best.PSObject.Properties['InterfaceAlias']).Value } else { $null }
+if ($bestAlias -eq "vEthernet ($SwitchName)") { ... }
+```
+
+### 2. `WS2025-Eval.vhdx` copy from Host A - file lock on the *destination* requires Host B reboot
+
+To save the 11 GB internet redownload, we copied the parent VHDX from Host A to Host B over
+LAN (PSDrive against `\\<HostA>\C$` from a WinRM session on Host B, then `Copy-Item`). The
+copy succeeded (size matches, 10.88 GB on Host B). But every subsequent read - `Get-FileHash`,
+`[IO.File]::Open` with `FileShare.Read`, even another `Copy-Item` - failed with **"file is in
+use by another process"**.
+
+Investigation:
+- `Get-DiskImage`: nothing - file is not mounted as a VHD.
+- `Get-VHD`: nothing - Hyper-V management doesn't track it as a VM disk.
+- `Restart-Service vmms`: no effect - the lock survived.
+- `Get-SmbOpenFile`: empty - not held over SMB.
+- `Defender exclusion` added for `C:\HyperV-Lab\`: no effect.
+
+The lock is held by an unidentified kernel-level component (probably the Hyper-V VHD parser
+`vhdmp.sys` or a VSS writer scanning the new VHDX). On a brand-new host this can't easily be
+released by stopping services.
+
+**Fix:** `Restart-Computer` on Host B (zero risk - no VMs yet, no work to lose). After the
+reboot the file is readable, mountable as `VHDX/Dynamic/64 GB`, and SHA256-hashes cleanly.
+Per-VM provisioning then works normally.
+
+### 3. `Files\` media copy from Host A - PSDrive + recursive `Copy-Item`, ~19 min for ~10 GB
+
+Same PSDrive pattern: `New-PSDrive HOSTASRC FileSystem \\$srcIp\C$ -Credential $cred`, then
+`Copy-Item HOSTASRC:\HyperV-Lab\Files\* C:\HyperV-Lab\Files\ -Recurse -Force`. ~10 GB across
+14 sub-folders (ADK, ADKPE, SCCM, SQL, SSMS, etc). PowerShell's per-file overhead made it
+slower than expected (~19 min vs the ~2 min a raw stream copy would take), but every
+sub-folder size matched Host A exactly. **No file-lock issue on media** (only the VHDX got
+auto-attached by Hyper-V).
+
+### 4. Site B VM provisioning - existing `New-LabVM` pattern, two new scripts
+
+Existing `New-B-MPDP.ps1` works as-is (matches our 6 GB / 2 vCPU / 10.20.0.5 spec). Created
+two new scripts mirroring the A-side templates:
+
+- `scripts/vms/New-B-SQLSCOM.ps1` - `New-LabVM -Name B-SQLSCOM -IP 10.20.0.41 -RamGB 8
+   -StartupGB 6 -VCPU 4 -DataDiskGB 100`
+- `scripts/vms/New-B-SCOMMS.ps1`  - `New-LabVM -Name B-SCOMMS  -IP 10.20.0.40 -RamGB 6
+   -StartupGB 4 -VCPU 4` (lower startup because SCOM MS has bursty MP-import RAM usage that
+  Dynamic Memory grows into; idle baseline ~1 GB)
+
+Staged `scripts\vms\*.ps1` to Host B's `C:\HyperV-Lab\scripts\vms\` via `Copy-Item -ToSession`
+on a new PSSession, then `Invoke-Command -Session` to run the New-B-*.ps1 scripts locally on
+Host B. All three VMs provisioned cleanly (~2 min each) - same DISM Datacenter conversion +
+firewall-disable flow as A-side. Host B at idle holds the 3 VMs in ~3 GB total via Dynamic
+Memory ballooning.
+
+### 5. Cross-site networking - the long investigation that ended at Tailscale
+
+**The problem (preview of conclusion):** Windows NetNat unconditionally SNATs any packet
+whose source IP is in the configured internal prefix and exits via a "non-internal"
+interface. Cross-site VM traffic (10.10.0.x to 10.20.0.x routed via the home LAN Wi-Fi)
+always triggers SNAT under that rule - source IP gets rewritten to the host's LAN IP. There
+is no per-flow / per-destination NAT-exception knob in NetNat. So any plan that ships
+Site-A-to-Site-B traffic through Wi-Fi 2 NATs both ways and breaks the round-trip.
+
+**What we tried (and why each failed):**
+
+a. **Local LAN routing with default NetNat (`InternalIPInterfaceAddressPrefix=10.10.0.0/24`
+   on Host A, `10.20.0.0/24` on Host B):** added `New-NetRoute` entries for the other site's
+   subnet via the LAN Wi-Fi 2 IP (`192.168.2.112` / `192.168.2.114`), enabled
+   `Set-NetIPInterface -Forwarding Enabled` on both `vEthernet (Lab)` and `Wi-Fi 2`, added
+   firewall allow rules for the other site's subnet. Result: cross-site pings fail.
+   Packet capture on Host B's Wi-Fi 2 showed incoming packets with
+   `Src=192.168.2.112, Dst=10.20.0.5` (instead of `10.10.0.2 -> 10.20.0.5`) -
+   **Host A NetNat SNAT'd** despite the destination being a "lab" subnet. Even though the
+   forward path delivers the packet, B-MPDP replies to `192.168.2.112`, which Host B then also
+   SNATs (src becomes `192.168.2.114`), so by the time the reply arrives at Host A's Wi-Fi 2
+   the original NetNat connection-tracking entry doesn't match and the reply is dropped.
+   **Bidirectional SNAT breaks the round-trip.**
+
+b. **"Widen" NetNat's internal prefix to `10.0.0.0/16`** so that both Site A (10.10) and Site
+   B (10.20) would supposedly be "internal" and NAT would skip when src AND dst are both in
+   the prefix. Result: cross-site works (source IPs preserved) BUT outbound internet from
+   Site A VMs breaks. **Off-by-many error:** `10.0.0.0/16` covers `10.0.0.0 - 10.0.255.255`
+   only; it includes NEITHER 10.10.0.x nor 10.20.0.x. So no NAT happened at all - source
+   passed through unchanged, including outbound 10.10.0.2 -> 1.1.1.1 packets that the home
+   router can't route back. (Right CIDR for "all 10.x" would be `10.0.0.0/8`.)
+
+c. **Try `10.0.0.0/8`** - actually covers both sites. Result: internet works again (Site A
+   VMs reach 1.1.1.1:443), BUT cross-site SNATs again. Confirmed assumption wrong: Windows
+   NetNat does NOT skip NAT when destination is also in the internal prefix. **NetNat's rule
+   is purely source-based: any packet with src in the prefix that exits via a non-internal
+   interface gets SNAT'd, regardless of destination.**
+
+d. **Revert to original `/24` prefixes**, leave the LAN routes in place, test whether the
+   things that actually matter (LDAP / Kerberos / SMB / WinRM) tolerate the SNAT'd source.
+   Result: every cross-site TCP probe fails (53/88/135/389/445/5985 all `False`) - the
+   bidirectional SNAT loop kills the TCP handshake at the reply stage. So **even
+   protocols that don't care about source IP fail**, because the NAT tracking on each host
+   doesn't recognize the reply that comes back from the other side's NAT.
+
+**Why Tailscale is the answer (and was always the answer):**
+
+Tailscale's subnet routing operates **below** Windows NetNat - the cross-site packet exits
+the host via the Tailscale virtual interface, not Wi-Fi 2, so NetNat never sees it. Source
+IP is preserved end-to-end. The same Tailscale that was *already* on both hosts (per gotcha
+#2 of the 2026-05-23 entry) is already advertising `10.10.0.0/24` from Host A - that's why
+**B-MPDP -> A-DC on TCP 53/389/5985 already succeeds today** with zero extra config (the
+admin approval for Host A's advertised route was done previously). For the reverse direction
+(A -> B, needed by SCCM client push from A-SCCM to B-MPDP / DP pull / SCOM A-side targets),
+we need Host B to *also* advertise `10.20.0.0/24` on Tailscale and have it approved.
+
+**The one piece that requires user action:**
+
+Tailscale on Windows runs as a per-user GUI daemon - the CLI refuses commands from an
+Administrator WinRM session ("`401 Unauthorized: Tailscale already in use by ...\itamartz`").
+So Claude can't run `tailscale up --advertise-routes=10.20.0.0/24` from this side. You need
+to run it (or set the equivalent in Tailscale GUI) on Host B in your own session, then approve
+the new route in the Tailscale admin console:
+
+```powershell
+# On Host B, in your own interactive PowerShell session:
+& 'C:\Program Files\Tailscale\tailscale.exe' up --advertise-routes=10.20.0.0/24 --accept-routes
+# Then visit https://login.tailscale.com/admin/machines and approve the new advertised
+# subnet route for MS-A2.
+```
+
+Once approved, Host A's routing table picks up `10.20.0.0/24 via Tailscale` automatically,
+and bidirectional cross-site works with source IPs preserved (verified pattern via the
+existing 10.10.0.0/24 Tailscale subnet route).
+
+**Final state after this session:**
+
+- LAN-route experiments cleaned up: `Get-NetRoute` on Host A has no `10.20.0.0/24` entry; on
+  Host B the Tailscale-advertised `10.10.0.0/24` route is back to its default metric 0
+  (winning, as it should). `Lab-NAT-SiteA` is back to `10.10.0.0/24`, `Lab-NAT-SiteB` is back
+  to `10.20.0.0/24`.
+- Firewall rules `Lab-Allow-Cross-Site-{A,B}-In` left in place on Host {B,A} respectively
+  (harmless, useful for the Tailscale path).
+- `Set-NetIPInterface -Forwarding Enabled` left on - it was already required for NetNat.
+- **B -> A direction works now** via existing Tailscale subnet route (verified TCP 53/389/5985
+  from B-MPDP succeed) - sufficient for domain-join, LDAP, Kerberos, SCCM client registration.
+- **A -> B direction blocked** until the user runs the Tailscale advertise on Host B and
+  approves it in the admin console.
+
+### Lesson
+
+For multi-host Hyper-V labs on Windows where VMs sit behind per-host Internal+NetNat
+vSwitches, **don't try to route cross-host VM traffic over the home LAN through Windows
+NetNat**. NetNat's source-only NAT rule makes the round-trip impossible without losing source
+IP, and the prefix knob does not give you a way to skip it for inter-host destinations.
+Tailscale subnet routes (or any equivalent overlay that exits via a separate virtual
+interface) is the clean solution - and it preserves source IPs end-to-end, which Kerberos /
+SCCM client push / DFSR all need.
