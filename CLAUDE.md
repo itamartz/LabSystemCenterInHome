@@ -598,6 +598,7 @@ Built by (run from the host, in order):
 | `20-Close-SCOMAlerts.ps1` | Force-closes active alerts (ResolutionState != 255). Reports per-alert refusals from SCOM (it blocks closing a monitor-based alert while the monitor is still Unhealthy). | Yes — DSC-style Test (`Get-SCOMAlert | Where ResolutionState -ne 255`) → Set (`Set-SCOMAlert -ResolutionState 255`). |
 | `21-Apply-SADABOverrides.ps1` | Authors lab-specific SCOM overrides in unsealed `SADAB_<source>_Overrides` MPs (the naming convention) when a monitor genuinely needs suppressing. **Not used in the current build** — root-cause fixes (script 22) cleared all noise. Kept as the documented mechanism if a future situation demands suppression. | Yes — per (source MP, monitor) DSC-style Test (override exists? property `Enabled=false`?) → Set (build unsealed MP + `Disable-SCOMMonitor -ManagementPack <unsealed>`). |
 | `22-Fix-SCOMAlertRootCauses.ps1` | Fixes the actual conditions the noise monitors flag rather than suppressing them: A-DC NIC DNS set to `10.10.0.2,127.0.0.1` (Microsoft single-DC recommended pattern), daily Defender QuickScan schedule + immediate scan on all 8 monitored servers. After running, every "Defender scan" and "NetworkAdapters DNS" monitor flips Healthy and the alerts auto-close. | Yes — per-VM DSC-style Test (`Get-DnsClientServerAddress` / `Get-MpPreference`) → Set (`Set-DnsClientServerAddress` / `Set-MpPreference`) + a one-shot `Start-MpScan` to flip the monitor immediately. |
+| `23-Install-MCM-ManagementPack.ps1` | Imports Kevin Holman's community MCM (Microsoft Configuration Manager) management pack — the replacement for the deprecated Microsoft SCCM MP that MS removed from the Download Center. Source: https://github.com/thekevinholman/MCM. The single sealed `MECM.mp` file is downloaded directly from the GitHub raw URL. | Yes — DSC-style Test (`Get-SCOMManagementPack -Name 'MECM' \| version >= 5.0.2303.2`) → Set (BITS download MECM.mp → `Import-SCOMManagementPack`). |
 
 **Lab simplifications:** Action / DAS / DataReader / DataWriter accounts all run as
 `SADAB\Administrator` (single-account lab; in production these should be four separate
@@ -722,6 +723,54 @@ Re-run / verify from the host (idempotent):
 ```powershell
 . .\scripts\lib\Connect-LabHost.ps1
 Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\18-Import-RelevantMPs.ps1' }
+```
+
+## MCM (SCCM) Management Pack — Kevin Holman community MP (2026-06-01)
+
+The Microsoft-shipped SCCM MP for SCOM was deleted from the Download Center
+(id=34709 returns 404) and SCCM Current Branch 2509 doesn't ship a SCOM MP
+either, so the gap in script 18 is filled by **Kevin Holman's MCM MP**:
+
+| | |
+|---|---|
+| Source | https://github.com/thekevinholman/MCM |
+| File | `MECM.mp` — single sealed MP, ~258 KB |
+| Version | 5.0.2303.2 (8/3/2023) |
+| Imports as | `Name=MECM`, `DisplayName="Microsoft Configuration Manager"`, `Sealed=True` |
+| Script | `scripts/post-deploy/23-Install-MCM-ManagementPack.ps1` (DSC-style Test→Set) |
+
+**Lab discoveries within minutes of import (auto-discovered via WMI on the
+SCCM-managed agents):**
+
+| Class | Instance(s) | Members |
+|---|---|---|
+| `MECM.SiteSystem` | 2 | A-SCCM, A-MPDP |
+| `MECM.Client` | 4 | A-SCCM, A-SQLSCCM, A-MPDP, A-DFSR |
+| `MECM.SiteServerComputers.Group` | 1 (A-SCCM) | site server |
+| `MECM.SiteDatabaseComputers.Group` | 1 (A-SQLSCCM) | site DB (CM_PR1) |
+| `MECM.ManagementPointComputers.Group` | 1 (A-MPDP) | MP role |
+| `MECM.DistributionPointComputers.Group` | 1 (A-MPDP) | DP role |
+| `MECM.SoftwareUpdatePointComputers.Group` | 1 (A-MPDP) | SUP role |
+| `MECM.PrimarySiteComputers.Group` | 1 (A-SCCM) | primary site |
+| `MECM.Hierarchy.Root` | 1 | the PR1 hierarchy |
+
+B-MPDP appears as a SCOM agent but **not** in any MECM group — by design, since
+Site B's SCCM stack isn't built yet (Phase 2 still pending for B-SCCM /
+B-SQLSCCM).
+
+**Lab-relevant defaults the MP ships with (from the author's release notes):**
+- SMSExec service monitor **disabled** on Site Database Computers Group (so SQL
+  DB servers don't get flagged for not running SMSExec). Matches our setup -
+  A-SQLSCCM hosts CM_PR1 but isn't a site server.
+- PXE role monitor checks **`SccmPxe`** service (not `wdsserver`). Switch the
+  override if you ever enable PXE via WDS instead.
+- Aggregate/dependency rollup alerts are intentionally disabled - real noise
+  comes from the unit monitors only.
+
+Re-run / verify from the host:
+```powershell
+. .\scripts\lib\Connect-LabHost.ps1
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\23-Install-MCM-ManagementPack.ps1' }
 ```
 
 ## SCOM alert hygiene — fix-the-root-cause + override naming convention (2026-06-01)
