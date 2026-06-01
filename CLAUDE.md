@@ -595,6 +595,9 @@ Built by (run from the host, in order):
 | `17-Install-SCOMConsole-B-SCOMMS.ps1` | SCOM 2025 Operations Console (co-located with MS) | Yes — DSC-style Test (exe + registry probe) → Set (`setup.exe /install /components:OMConsole`) |
 | `18-Import-RelevantMPs.ps1` | All MPs relevant to the SADAB environment (ADDS, ADCS, DNS, IIS, SQL, SSRS, WSUS, Defender) | Yes — per-family DSC-style Test (`Get-SCOMManagementPack` by name pattern) → Set (BITS download → msiexec extract → `Import-SCOMManagementPack`) |
 | `19-Enable-SCOMAgentProxy.ps1` | Enables `ProxyingEnabled=True` on every agent (required by many MPs — AD, SQL clusters, IIS app pools, clustered roles) | Yes — per-agent DSC-style Test (`Get-SCOMAgent.ProxyingEnabled.Value`) → Set (`Enable-SCOMAgentProxy`). Re-run after script 15 for newly-pushed agents. |
+| `20-Close-SCOMAlerts.ps1` | Force-closes active alerts (ResolutionState != 255). Reports per-alert refusals from SCOM (it blocks closing a monitor-based alert while the monitor is still Unhealthy). | Yes — DSC-style Test (`Get-SCOMAlert | Where ResolutionState -ne 255`) → Set (`Set-SCOMAlert -ResolutionState 255`). |
+| `21-Apply-SADABOverrides.ps1` | Authors lab-specific SCOM overrides in unsealed `SADAB_<source>_Overrides` MPs (the naming convention) when a monitor genuinely needs suppressing. **Not used in the current build** — root-cause fixes (script 22) cleared all noise. Kept as the documented mechanism if a future situation demands suppression. | Yes — per (source MP, monitor) DSC-style Test (override exists? property `Enabled=false`?) → Set (build unsealed MP + `Disable-SCOMMonitor -ManagementPack <unsealed>`). |
+| `22-Fix-SCOMAlertRootCauses.ps1` | Fixes the actual conditions the noise monitors flag rather than suppressing them: A-DC NIC DNS set to `10.10.0.2,127.0.0.1` (Microsoft single-DC recommended pattern), daily Defender QuickScan schedule + immediate scan on all 8 monitored servers. After running, every "Defender scan" and "NetworkAdapters DNS" monitor flips Healthy and the alerts auto-close. | Yes — per-VM DSC-style Test (`Get-DnsClientServerAddress` / `Get-MpPreference`) → Set (`Set-DnsClientServerAddress` / `Set-MpPreference`) + a one-shot `Start-MpScan` to flip the monitor immediately. |
 
 **Lab simplifications:** Action / DAS / DataReader / DataWriter accounts all run as
 `SADAB\Administrator` (single-account lab; in production these should be four separate
@@ -720,6 +723,42 @@ Re-run / verify from the host (idempotent):
 . .\scripts\lib\Connect-LabHost.ps1
 Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\18-Import-RelevantMPs.ps1' }
 ```
+
+## SCOM alert hygiene — fix-the-root-cause + override naming convention (2026-06-01)
+
+The fresh-install SCOM lab raised 9 active alerts after MPs imported. **All 9
+were cleared via root-cause fixes, with zero overrides used.** The convention
+documented here for future noise:
+
+**Naming convention for lab-specific override MPs:** `SADAB_<source>_Overrides`,
+one unsealed MP per source sealed MP being overridden. Example: an override
+into `Microsoft.WindowsDefender` lives in `SADAB_WindowsDefender_Overrides`.
+This is what `21-Apply-SADABOverrides.ps1` produces if it's ever needed - it
+authors unsealed MPs and calls `Disable-SCOMMonitor -ManagementPack <unsealed>`
+to add `MonitorPropertyOverride` entries with `Enabled=false`.
+
+**Why overrides go in an unsealed MP at all:** SCOM physically refuses to save
+an override into a sealed (vendor) MP. The unsealed MP holds the override and
+references the sealed MP it modifies - removing the sealed MP cleanly removes
+its overrides MP too.
+
+**Where SCOM fights you when closing alerts:** monitor-based alerts cannot be
+closed via `Set-SCOMAlert -ResolutionState 255` while the underlying monitor is
+still Unhealthy - SCOM returns "the alert ... cannot be closed in SCOM as the
+monitor which generated this alert is still unhealthy.". So the sequence is
+always (a) make the monitor Healthy first (root-cause fix OR override OR force
+re-eval via `ResetMonitoringState($monitor)`), then (b) script 20 to mop up
+anything that didn't auto-close.
+
+**What the 9 lab alerts actually were, and how they cleared:**
+
+| Alert / Source monitor | Count | Root cause | Fix applied |
+|---|---|---|---|
+| `Microsoft.WindowsDefender.ProtectedServer.AntimalwareScan.Monitor` | 8 | Defender installed on every server but never ran a periodic scan; monitor stays Unhealthy on its first eval | Script 22: `Set-MpPreference -ScanScheduleDay Everyday -ScanScheduleQuickScanTime 02:00`, plus one-shot `Start-MpScan -ScanType QuickScan` per VM. Then `ResetMonitoringState` on the 8 affected instances to force immediate re-eval. |
+| `Microsoft.Windows.Server.2016.AD.Configuration.NetworkAdapters.DNS.Monitor` | 1 (on A-DC) | DC's only DNS server was `127.0.0.1` - the documented Microsoft anti-pattern for single-DC startup race condition | Script 22: `Set-DnsClientServerAddress -ServerAddresses '10.10.0.2','127.0.0.1'` on A-DC's primary NIC. Monitor flips Healthy and the alert auto-closes. |
+| `Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.WebServiceAccessible` | 1 (on A-SCCM\SSRS) | SSRS still had `http://+:80` URL reservations alongside the HTTPS-only `https://+:443` ones we'd added in `Configure-SCCMReporting.ps1`. The MP probed HTTP first; SSRS responded "rsSecureConnectionRequired" because `SecureConnectionLevel=1`; monitor went Unhealthy. | Removed both `http://+:80` reservations via `MSReportServer_ConfigurationSetting.RemoveURL(...)`, restarted SSRS, `ResetMonitoringState` on the SSRS instance. **This removal is now also encoded in `Configure-SCCMReporting.ps1` for clean rebuilds.** |
+
+After all three fixes: `(Get-SCOMAlert | Where ResolutionState -ne 255).Count == 0`.
 
 ## Verifying Lab State (read-only — 2026-05-27)
 

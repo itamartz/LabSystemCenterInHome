@@ -152,6 +152,18 @@ Invoke-LabRemote -IPAddress $SccmIP -Credential $DomainCred -ScriptBlock {
     $rs=Get-WmiObject -Namespace "$base\$ver\Admin" -Class MSReportServer_ConfigurationSetting; $lcid=1033
     foreach($app in 'ReportServerWebService','ReportServerWebApp'){ $rs.ReserveURL($app,'https://+:443',$lcid)|Out-Null; $rs.CreateSSLCertificateBinding($app,$ca,'0.0.0.0',443,$lcid)|Out-Null }
     $rs.SetSecureConnectionLevel(1)|Out-Null
+    # HTTPS-only: remove the default http://+:80 URL reservations that SSRS Setup
+    # created. Otherwise the SCOM SSRS MP probes them first, gets back the
+    # "rsSecureConnectionRequired" error, and raises a noisy
+    # "Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.WebServiceAccessible" alert.
+    $existing = $rs.ListReservedUrls()
+    foreach($app in 'ReportServerWebService','ReportServerWebApp'){
+        for($i=0;$i -lt $existing.Application.Count;$i++){
+            if($existing.Application[$i] -eq $app -and $existing.UrlString[$i] -like 'http://*:80'){
+                $rs.RemoveURL($app, $existing.UrlString[$i], $lcid) | Out-Null
+            }
+        }
+    }
     Restart-Service SQLServerReportingServices -Force; Start-Sleep 20
     [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
     try{ "HTTPS test: " + (Invoke-WebRequest -UseBasicParsing "https://$PrimaryShort/ReportServer" -UseDefaultCredentials -TimeoutSec 15).StatusCode }catch{ "HTTPS: $($_.Exception.Message)" }
