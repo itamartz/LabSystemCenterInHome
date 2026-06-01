@@ -1228,3 +1228,66 @@ IP, and the prefix knob does not give you a way to skip it for inter-host destin
 Tailscale subnet routes (or any equivalent overlay that exits via a separate virtual
 interface) is the clean solution - and it preserves source IPs end-to-end, which Kerberos /
 SCCM client push / DFSR all need.
+
+---
+
+## 2026-06-01: SCOM 2025 silent install command-line syntax changed
+
+**Why:** Running `13b-Install-SCOM-B-SCOMMS.ps1` against SCOM 2025 media silently failed
+within seconds. `Setup1.log` (in `C:\Users\<acct>\AppData\Local\SCOM\LOGS\`) recorded:
+
+```
+Message Type  0: Invalid command line switches - no components switch found.. Error : 0x80004005
+   Unspecified error
+Message Type  0: Invalid command line switches, exiting..
+```
+
+The older `/install:ManagementServer` form (carried over from `13-Install-SCOM.ps1`) is no
+longer accepted by SCOM 2025 setup.
+
+**Fix** (now baked into `13b-Install-SCOM-B-SCOMMS.ps1`): SCOM 2025 uses two switches —
+`/install` is a verb, `/components:` picks the role.
+
+```powershell
+$scomArgs = @(
+    '/silent'
+    '/install'
+    '/components:OMServer'         # OMServer = Management Server (also OMConsole / OMWebConsole / OMReporting)
+    "/ManagementGroupName:$MgmtGroup"
+    ...
+)
+```
+
+Reference: [Install Operations Manager from the Command Prompt](https://learn.microsoft.com/system-center/scom/install-using-cmdline?view=sc-om-2025#command-line-parameters).
+Confirm progress via the second `Setup<N>.log` in the same LOGS dir — a working run lists
+"Copying Localization Folder", "Launching EXE : ...\SetupChainerUI.exe", then "Starting to
+wait." within ~30s. If that text never appears, setup is failing the command-line parse and
+exiting immediately — re-check the args.
+
+### Second failure: SQL Full Text Search missing on B-SQLSCOM
+
+Once the command-line was right, SCOM 2025 setup got past the chainer and into prereq
+validation, then exited with code `-17` in about a minute. `OpsMgrSetupWizard.log`:
+
+```
+Error:Sql Server does not have Full Text Search installed.
+Error:database parameter validation failed
+Server install state detection: database options are incomplete or invalid
+Always:OM component OMSERVER is not valid to install on this box.
+Always:Application Ended: InvalidToInstallOnThisMachine
+```
+
+**Why:** SCOM 2025 [hard-requires Full-Text Search](https://learn.microsoft.com/system-center/scom/plan-sqlserver-design?view=sc-om-2025#sql-server-requirements)
+on every SQL instance hosting an Operations Manager database (OperationsManager and
+OperationsManagerDW). The original `06b-Install-SQL-B-SQLSCOM.ps1` only installed
+`FEATURES=SQLENGINE,CONN,SNAC_SDK`.
+
+**Fix** (now baked into `06b-Install-SQL-B-SQLSCOM.ps1`):
+
+1. The `FEATURES=` line now includes `FULLTEXT` for clean rebuilds.
+2. The idempotency branch (when MSSQLSERVER already exists) checks for `MSSQLFDLauncher`
+   service / `FeatureList` registry value and, if missing, runs the extracted setup with
+   `/Action=Install /Features=FullText` to add the feature in place. Took ~30 sec on this
+   lab VM.
+3. Re-run the SCOM install — `OpsMgrSetupWizard.log` should now progress past the database
+   validation stage.

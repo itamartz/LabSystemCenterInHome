@@ -6,9 +6,9 @@ This file guides Claude Code when working with this repository.
 
 A 2-site **SCCM + SCOM lab** running on physical Hyper-V hardware you own, provisioned and configured end-to-end by PowerShell over WinRM.
 
-**Status:** **Phase 1 SCCM Primary is INSTALLED and running on Host A (2026-05-23).** All 5 Site A VMs created, converted to Datacenter, domain-joined to sadab.pri. SQL 2019 + CU32 on A-SQLSCCM. SCCM Primary site **PR1** (version 5.00.9141.1000) installed on A-SCCM — SMS_EXECUTIVE + SMS_SITE_COMPONENT_MANAGER running, SMS Provider responds. **MP + DP now installed on A-MPDP (2026-05-24)** — the SCCM agent is pushed to all 4 discovered Site A servers (A-SCCM, A-SQLSCCM, A-MPDP, A-DFSR; all healthy/active), an `All Servers` device collection exists, and 7-Zip + Notepad++ are deployed as Required and verified installed (see "SCCM Client Management..." below). Host #2 not yet acquired — Site B, SCOM, SQL AG, DFSR deferred.
+**Status:** Phase 1 SCCM Primary is INSTALLED and running on Host A (2026-05-23). All 5 Site A VMs created, converted to Datacenter, domain-joined to sadab.pri. SQL 2019 + CU32 on A-SQLSCCM. SCCM Primary site **PR1** (version 5.00.9141.1000) installed on A-SCCM — SMS_EXECUTIVE + SMS_SITE_COMPONENT_MANAGER running, SMS Provider responds. **MP + DP now installed on A-MPDP (2026-05-24)** — the SCCM agent is pushed to all 4 discovered Site A servers (A-SCCM, A-SQLSCCM, A-MPDP, A-DFSR; all healthy/active), an `All Servers` device collection exists, and 7-Zip + Notepad++ are deployed as Required and verified installed (see "SCCM Client Management..." below).
 
-Remaining Phase 1 (optional): step 12 (DFSR). Phase 2 (needs Host B): SQL AG, passive SCCM, SCOM.
+**Phase 2 partial (2026-05-31 / 2026-06-01):** Host B (`MS-A2`) onboarded, cross-host networking validated, and the SCOM stack is now LIVE — **B-SCOMMS + B-SQLSCOM** built, **SCOM 2025 Management Server installed** with management group `LAB-SCOM-MG`, **SCOM agent deployed to all 6 SCCM-side VMs** (A-DC, A-SQLSCCM, A-MPDP, A-SCCM, A-DFSR, B-MPDP — all `HealthState=Success`, agent build 10.25.10079.0), and the **Windows Server Operating System 2016+ Management Pack** imported (the 10.1.x family covers Server 2016/2019/2022/2025; "Microsoft Windows Server 2025 Datacenter" is the discovered class instance). Remaining Phase 2: B-SCCM passive node + B-SQLSCCM AG secondary + B-DFSR (need more Host B RAM / project priority).
 
 **Rebuild from scratch:** See `DEPLOY.md` for the sequential procedure. Every gotcha hit during the build is captured in `scripts/manual-fixes.md`.
 
@@ -56,12 +56,12 @@ Effective lab budget on Host A: `28.8 GB physical - ~3 GB OS - ~4–8 GB reserve
 | A-SQLSCCM | 10.10.0.4 | A | SQL 2019 (AG primary) | 8 GB | 4 | **1** |
 | A-MPDP | 10.10.0.5 | A | SCCM MP + DP | 6 GB | 2 | **1** |
 | A-DFSR | 10.10.0.7 | A | DFSR | 4 GB | 2 | **1** |
-| A-SCOM | 10.10.0.40 | A | SCOM Management Server | 8 GB | 4 | Deferred |
-| A-SQLSCOM | 10.10.0.41 | A | SQL for SCOM | 8 GB | 2 | Deferred |
-| B-SCCM | 10.20.0.3 | B | SCCM Primary (passive node) | 12 GB | 4 | **1** |
-| B-SQLSCCM | 10.20.0.4 | B | SQL 2019 (AG secondary) | 8 GB | 4 | **1** |
-| B-MPDP | 10.20.0.5 | B | SCCM MP + DP | 6 GB | 2 | **1** |
-| B-DFSR | 10.20.0.7 | B | DFSR | 4 GB | 2 | **1** |
+| B-SCCM | 10.20.0.3 | B | SCCM Primary (passive node) | 12 GB | 4 | **2** (Host B + RAM) |
+| B-SQLSCCM | 10.20.0.4 | B | SQL 2019 (AG secondary) | 8 GB | 4 | **2** (Host B + RAM) |
+| B-MPDP | 10.20.0.5 | B | SCCM MP + DP | 6 GB | 2 | **2** |
+| B-DFSR | 10.20.0.7 | B | DFSR | 4 GB | 2 | **2** (Host B + RAM) |
+| B-SCOMMS | 10.20.0.40 | B | SCOM Management Server (LAB-SCOM-MG) | 6 GB | 4 | **2** |
+| B-SQLSCOM | 10.20.0.41 | B | SQL 2019 for SCOM (Operational + DW DBs) | 8 GB | 4 | **2** |
 
 Phase 1 total startup RAM: **64 GB** across both hosts. Phase 2 (add SCOM) brings it to 80 GB.
 
@@ -252,6 +252,29 @@ each `DSC_<resource>.psm1` and call `Test-TargetResource` / `Set-TargetResource`
 **directly, in-process**, under `SADAB\Administrator` (which has the console, the
 `SMS_ADMIN_UI_PATH` env var, and SCCM Full Administrator rights). New SCCM config work
 should extend this pattern — do not add cmdlet-only configuration scripts.
+
+## SCOM Configuration Convention — DSC-style Test/Set (decided 2026-06-01)
+
+**All SCOM configuration in this lab follows the same Test → Set idempotency pattern
+as SCCM.** Each config script defines explicit `Test-<thing>` / `Set-<thing>` helpers
+around the in-product `OperationsManager` PowerShell cmdlets, runs Test, runs Set only
+on drift, then Re-Tests. Re-runs are no-ops when in compliance.
+
+**Why we wrap cmdlets ourselves instead of using a DSC module:** the only published
+SCOM DSC module — `xSCOM` (dsccommunity) — is **deprecated**, hasn't been updated to
+target SCOM 2022 or 2025, and its MOF resources call deprecated cmdlet aliases
+(`Get-SCManagementPack` / `Import-SCManagementPack`) that aren't guaranteed in SCOM 2025.
+Wrapping the supported cmdlets directly is more durable and keeps idempotency explicit
+in the script. We follow the same in-process Test→Set pattern as the SCCM scripts; new
+SCOM config work should extend this pattern, not introduce cmdlet-only scripts.
+
+**Documented one-shot exceptions** (parallel to SCCM's `xSccmInstall` composite):
+- `13b-Install-SCOM-B-SCOMMS.ps1` — the SCOM 2025 `Setup.exe` Management Server bootstrap
+  install is a one-shot bootstrap, not declarative configuration. Idempotency comes
+  from a single "is HealthService installed?" check at the top.
+- `06b-Install-SQL-B-SQLSCOM.ps1` — likewise the SQL 2019 install is one-shot; the
+  script does check for MSSQLSERVER service presence and only adds Full-Text Search
+  in-place when needed (idempotent add-feature path).
 
 ## SCCM Discovery Configuration (site PR1 — applied 2026-05-24)
 
@@ -551,6 +574,92 @@ DSC-backed via `Configure-SCCMServiceConnectionPoint.ps1` (ConfigMgrCBDsc
 Online means `OfflineMode` prop = 0). The role runs as threads under SMS_EXECUTIVE
 (SMS_DMP_DOWNLOADER/UPLOADER) — there is no standalone Windows service, so an empty
 `Get-Service SMS_SERVICE_CONNECTION_POINT` is normal. Clean install, no gotchas.
+
+## SCOM 2025 Management Server install (LAB-SCOM-MG — 2026-06-01)
+
+The SCOM stack lives on Site B (Host B):
+
+| VM | IP | Role | RAM / vCPU | Notes |
+|---|---|---|---|---|
+| **B-SCOMMS** | 10.20.0.40 | SCOM 2025 Management Server (Root MS) | 6 GB / 4 | LAB-SCOM-MG; HealthService + OMSDK + cshost running |
+| **B-SQLSCOM** | 10.20.0.41 | SQL 2019 Dev + CU32 + **FullText** | 8 GB / 4 | `OperationsManager` + `OperationsManagerDW` databases; data on `D:\SQLData`, +100 GB data disk |
+
+Built by (run from the host, in order):
+
+| Script | Purpose | DSC? |
+|---|---|---|
+| `06b-Install-SQL-B-SQLSCOM.ps1` | SQL 2019 + CU32 + FullText | one-shot bootstrap (documented exception) |
+| `13b-Install-SCOM-B-SCOMMS.ps1` | SCOM 2025 MS via setup.exe | one-shot bootstrap (documented exception) |
+| `15-Install-SCOMAgents.ps1` | Push agent to all SCCM-side VMs | Yes — DSC-style Test→Set wrappers around `Install-SCOMAgent` |
+| `16-Import-WindowsServerOS-MP.ps1` | Extract + import the Server-OS MP family | Yes — DSC-style Test→Set wrappers around `msiexec` and `Import-SCOMManagementPack` |
+
+**Lab simplifications:** Action / DAS / DataReader / DataWriter accounts all run as
+`SADAB\Administrator` (single-account lab; in production these should be four separate
+service accounts). Management group name is sourced from `lab-config.json`
+(`scom.managementGroup = LAB-SCOM-MG`).
+
+**Gotchas (encoded in scripts + `scripts/manual-fixes.md` 2026-06-01):**
+- **SCOM 2025 silent install syntax changed.** The legacy `/install:ManagementServer`
+  fails immediately with `Invalid command line switches - no components switch found.
+  Error : 0x80004005` (see `Setup<N>.log` in `C:\Users\<acct>\AppData\Local\SCOM\LOGS`).
+  SCOM 2025 splits these into two switches: `/install` (verb) plus
+  `/components:OMServer` (role). Other roles: `OMConsole`, `OMWebConsole`, `OMReporting`.
+  [Reference](https://learn.microsoft.com/system-center/scom/install-using-cmdline?view=sc-om-2025#command-line-parameters).
+- **SCOM 2025 requires SQL Full-Text Search** on every SQL instance hosting an
+  OperationsManager database. The Setup wizard fails fast (exit `-17`) with
+  `OpsMgrSetupWizard.log` showing "Sql Server does not have Full Text Search
+  installed.". `06b` now installs `FEATURES=SQLENGINE,FULLTEXT,CONN,SNAC_SDK` and its
+  idempotency branch adds FullText in-place via
+  `setup.exe /Action=Install /Features=FullText /InstanceName=MSSQLSERVER` if missing
+  (~30s on this lab VM).
+- **Health states right after install.** `Get-SCOMAgent` reports `Uninitialized` for
+  the first 5-10 min after push — the agent has to complete its first connect, request
+  initial config, download MPs, and send a heartbeat before the MS marks it Healthy.
+  In the meantime, the agent's local Operations Manager event log will show event 20070
+  "OpsMgr Connector connected to ... but the connection was closed immediately after
+  authentication" — this is benign while pending approval; the script auto-runs
+  `Approve-SCOMPendingManagement`. Final state on this lab: all 6 agents Success
+  with agent build `10.25.10079.0`.
+
+Re-run / verify from the host (each script is idempotent — all-`[TEST PASS]` on a healthy run):
+```powershell
+. .\scripts\lib\Connect-LabHost.ps1
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\15-Install-SCOMAgents.ps1' }
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\16-Import-WindowsServerOS-MP.ps1' }
+```
+
+## SCOM Windows Server OS Management Pack — Server 2025 (LAB-SCOM-MG — 2026-06-01)
+
+Imported by `Configure-SCOM`'s `16-Import-WindowsServerOS-MP.ps1` from
+[Microsoft System Center Management Pack for Windows Server Operating System 2016 and
+above](https://www.microsoft.com/en-us/download/details.aspx?id=54303) (MSI version
+10.1.2.2 dated 5/12/2025; MP content version 10.1.1.0). **The same package covers
+Server 2016, 2019, 2022, AND 2025** — there is no separate "2025" MP, the OS class
+self-identifies via WMI at the agent. The discovered display name is "Microsoft Windows
+Server 2025 Datacenter" with HealthState `Success`.
+
+| MP imported | Version | Sealed |
+|---|---|---|
+| Microsoft.Windows.Server.Library | 10.1.1.0 | yes |
+| Microsoft.Windows.Server.2016.Discovery | 10.1.1.0 | yes |
+| Microsoft.Windows.Server.2016.Monitoring | 10.1.1.0 | yes |
+| Microsoft.Windows.Server.2016.ProcessPortMonitoring | 10.1.1.0 | yes |
+| Microsoft.Windows.Server.ClusterSharedVolumeMonitoring | 10.1.1.0 | yes |
+| Microsoft.Windows.Server.Html5.Dashboard | 10.1.1.0 | yes |
+| Microsoft.Windows.Server.NetworkDiscovery | 10.25.10132.0 | yes (ships with SCOM 2025 media) |
+| Microsoft.Windows.Server.Reports | 10.1.1.0 | yes |
+
+**Gotchas (encoded in `16-Import-WindowsServerOS-MP.ps1`):**
+- **The MSI install path label changes between MP versions** ("Microsoft System Center
+  MP for WS 2016 and above" today; expect renames). The script discovers it via
+  `Get-ChildItem` filtered by name pattern rather than hardcoding.
+- **Sealed `.mpb` files don't expose Name/Version via simple XML reads.** The DSC-style
+  Test step uses the file's BaseName as the SCOM `Name` (the package files are named
+  after the MP's `Name` element, so this match works for the out-of-band catalog MPs).
+  Version comparison is deferred — presence-by-name is sufficient for lab idempotency.
+- **Batch import vs. one-by-one passes.** `Import-SCOMManagementPack -FullName <array>`
+  lets SCOM resolve dependency order on its own; if the batch fails (typically due to
+  a dependency timing issue) the script falls back to one-by-one with retry passes.
 
 ## Verifying Lab State (read-only — 2026-05-27)
 
