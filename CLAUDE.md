@@ -594,6 +594,7 @@ Built by (run from the host, in order):
 | `16-Import-WindowsServerOS-MP.ps1` | Extract + import the Server-OS MP family | Yes — DSC-style Test→Set wrappers around `msiexec` and `Import-SCOMManagementPack` |
 | `17-Install-SCOMConsole-B-SCOMMS.ps1` | SCOM 2025 Operations Console (co-located with MS) | Yes — DSC-style Test (exe + registry probe) → Set (`setup.exe /install /components:OMConsole`) |
 | `18-Import-RelevantMPs.ps1` | All MPs relevant to the SADAB environment (ADDS, ADCS, DNS, IIS, SQL, SSRS, WSUS, Defender) | Yes — per-family DSC-style Test (`Get-SCOMManagementPack` by name pattern) → Set (BITS download → msiexec extract → `Import-SCOMManagementPack`) |
+| `19-Enable-SCOMAgentProxy.ps1` | Enables `ProxyingEnabled=True` on every agent (required by many MPs — AD, SQL clusters, IIS app pools, clustered roles) | Yes — per-agent DSC-style Test (`Get-SCOMAgent.ProxyingEnabled.Value`) → Set (`Enable-SCOMAgentProxy`). Re-run after script 15 for newly-pushed agents. |
 
 **Lab simplifications:** Action / DAS / DataReader / DataWriter accounts all run as
 `SADAB\Administrator` (single-account lab; in production these should be four separate
