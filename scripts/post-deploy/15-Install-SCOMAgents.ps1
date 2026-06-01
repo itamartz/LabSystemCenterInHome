@@ -1,25 +1,31 @@
 <#
 .SYNOPSIS
-    Pushes the SCOM 2025 agent from B-SCOMMS to all SADAB SCCM-side VMs and
-    confirms each one is registered in the LAB-SCOM-MG management group.
+    Pushes the SCOM 2025 agent to every enabled domain computer in sadab.pri,
+    excluding the management server itself, and confirms each one is
+    registered Healthy in LAB-SCOM-MG.
 
 .NOTES
     Must run ON HOST B (uses Hyper-V direct PowerShell to B-SCOMMS).
 
-    DSC-style (per the SCOM Configuration Convention in CLAUDE.md):
-    For every target, a Test step (`Get-SCOMAgent`) returns the current state
-    and a Set step (`Install-SCOMAgent`) reconciles it. The script then
-    re-Tests after Set, which is what makes runs idempotent and self-healing.
+    DSC-style (per the "SCOM Configuration Convention" in CLAUDE.md):
+    Targets are *discovered* from Active Directory (every enabled computer
+    object), so adding a new VM and joining it to sadab.pri is enough - no
+    script edit needed. For each target, Test (`Get-SCOMAgent`) decides
+    whether Set (`Install-SCOMAgent`) runs. Re-Test runs at the end.
 
     The `OperationsManager` PowerShell module ships with the management server,
-    not with the community DSC modules (xSCOM is deprecated and not SCOM 2025
+    not with any maintained DSC module (xSCOM is deprecated and not SCOM 2025
     tested). So the Test/Set helpers wrap the in-product cmdlets directly.
 
-    Targets (all SCCM lab VMs):
-        A-DC, A-SQLSCCM, A-MPDP, A-SCCM, A-DFSR, B-MPDP
+    AD discovery is via [adsisearcher] so we don't depend on the RSAT
+    ActiveDirectory module being installed on B-SCOMMS.
 
-    B-SCOMMS itself runs the HealthService that came with the MS install -
-    no agent push needed.
+    Exclusions (encoded in the script):
+        - B-SCOMMS itself - it's the Management Server. Its HealthService is
+          installed as part of the MS bootstrap and SCOM tracks it via
+          Get-SCOMManagementServer, not Get-SCOMAgent. It already shows up as
+          a managed `Microsoft.Windows.Computer` instance.
+        - Any FQDN passed via -ExcludeFqdn.
 
     Prerequisites encoded in the Test step:
         - DNS resolution of each FQDN from B-SCOMMS (sadab.pri zone serves both subnets)
@@ -30,14 +36,9 @@
 param(
     [string]$VMName              = 'B-SCOMMS',
     [string]$DomainAdminPassword = 'LabAdmin@2026!',
-    [string[]]$Targets           = @(
-        'A-DC.sadab.pri'
-        'A-SQLSCCM.sadab.pri'
-        'A-MPDP.sadab.pri'
-        'A-SCCM.sadab.pri'
-        'A-DFSR.sadab.pri'
-        'B-MPDP.sadab.pri'
-    )
+    [string[]]$ExcludeFqdn       = @('B-SCOMMS.sadab.pri'),
+    # Override target list (skip AD discovery). Useful for narrow runs.
+    [string[]]$Targets
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,25 +51,51 @@ $cred = New-Object PSCredential(
     'SADAB\Administrator',
     (ConvertTo-SecureString $DomainAdminPassword -AsPlainText -Force))
 
-Write-Stage "Reconciling SCOM agents from $VMName to: $($Targets -join ', ')"
+# Pass a CSV through to dodge the array-marshalling quirks of Invoke-Command.
+$TargetsCSV = if ($Targets) { $Targets -join ';' } else { '' }
+$ExcludeCSV = $ExcludeFqdn -join ';'
 
-# Pass the target list as a single delimited string then split inside the remoting
-# scriptblock - PowerShell array marshalling through Invoke-Command/PSRemoting is
-# easy to get wrong (single-element arrays get unwrapped, multi-element arrays
-# sometimes arrive as one bag) so a CSV is the simple-and-correct path.
-$TargetsCSV = $Targets -join ';'
+Write-Stage "Reconciling SCOM agents from $VMName ..."
 
 Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
-    param([string]$TargetsCSV, [pscredential]$DomCred)
-    $Targets = $TargetsCSV -split ';'
+    param([string]$TargetsCSV, [string]$ExcludeCSV, [pscredential]$DomCred)
+
+    $exclude = @($ExcludeCSV -split ';' | Where-Object { $_ })
+
+    # Discover from AD if no -Targets was supplied.
+    if ($TargetsCSV) {
+        $Targets = $TargetsCSV -split ';'
+        Write-Host "Targets (caller-supplied): $($Targets -join ', ')"
+    } else {
+        # Enabled computer objects only:
+        # - objectCategory=computer  (NOT objectClass=computer - that also matches
+        #   msDS-GroupManagedServiceAccount because gMSAs inherit from computer.
+        #   objectCategory points at the actual class definition.)
+        # - NOT userAccountControl bit 2 (ACCOUNTDISABLE).
+        $searcher = [adsisearcher]'(&(objectCategory=computer)(!userAccountControl:1.2.840.113556.1.4.803:=2))'
+        $searcher.PageSize = 1000
+        $searcher.PropertiesToLoad.AddRange(@('dNSHostName','cn','operatingSystem')) | Out-Null
+        $found = $searcher.FindAll()
+        $Targets = foreach ($r in $found) {
+            $dns = $r.Properties['dnshostname'][0]
+            if ($dns) { [string]$dns }
+        }
+        $Targets = $Targets | Sort-Object -Unique
+        Write-Host "Discovered $($Targets.Count) enabled domain computers via AD"
+    }
+
+    if ($exclude.Count) {
+        $beforeCount = $Targets.Count
+        $Targets = $Targets | Where-Object { $_ -notin $exclude }
+        Write-Host "Excluded $($beforeCount - $Targets.Count): $($exclude -join ', ')"
+    }
+    Write-Host "Final target list ($($Targets.Count)): $($Targets -join ', ')"
 
     Import-Module OperationsManager -ErrorAction Stop
     New-SCOMManagementGroupConnection -ComputerName 'B-SCOMMS.sadab.pri' -ErrorAction Stop | Out-Null
-
     $ms = Get-SCOMManagementServer -Name 'B-SCOMMS.sadab.pri'
     if (-not $ms) { throw "No SCOM management server B-SCOMMS.sadab.pri" }
 
-    # DSC-style Test/Set helpers around the OperationsManager cmdlets.
     function Test-SCOMAgentDeployed {
         param([string]$FQDN)
         [bool](Get-SCOMAgent -DNSHostName $FQDN -ErrorAction SilentlyContinue)
@@ -79,6 +106,7 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
                           -ActionAccount $ActionAccount -ErrorAction Stop
     }
 
+    $didSet = $false
     foreach ($t in $Targets) {
         if (Test-SCOMAgentDeployed -FQDN $t) {
             Write-Host "[TEST PASS] $t already an SCOM agent - no action"
@@ -86,6 +114,7 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
             try {
                 Set-SCOMAgentDeployed -FQDN $t -ManagementServer $ms -ActionAccount $DomCred | Out-Null
                 Write-Host "[SET]       $t - push task submitted"
+                $didSet = $true
             } catch {
                 Write-Host "[SET FAIL]  $t : $($_.Exception.Message)" -ForegroundColor Yellow
             }
@@ -103,10 +132,11 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
         }
     }
 
-    Write-Host "`nRe-Test after Set (waits up to 5 min for agents to appear)..."
-    $deadline = (Get-Date).AddMinutes(5)
+    # Re-Test loop only if we actually pushed something; otherwise just print state once.
+    $waitMin = if ($didSet) { 5 } else { 0 }
+    $deadline = (Get-Date).AddMinutes($waitMin)
     do {
-        Start-Sleep -Seconds 15
+        if ($waitMin -gt 0) { Start-Sleep -Seconds 15 }
         $report = foreach ($t in $Targets) {
             $a = Get-SCOMAgent -DNSHostName $t -ErrorAction SilentlyContinue
             [PSCustomObject]@{
@@ -117,10 +147,12 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
             }
         }
         $missing = ($report | Where-Object { -not $_.Found }).Count
-        Write-Host ("  unregistered: {0} / {1}   (now {2:HH:mm:ss})" -f $missing, $Targets.Count, (Get-Date))
-    } while ($missing -gt 0 -and (Get-Date) -lt $deadline)
+        if ($waitMin -gt 0) {
+            Write-Host ("  unregistered: {0} / {1}   (now {2:HH:mm:ss})" -f $missing, $Targets.Count, (Get-Date))
+        }
+    } while ($waitMin -gt 0 -and $missing -gt 0 -and (Get-Date) -lt $deadline)
 
     $report | Format-Table -AutoSize | Out-String | Write-Host
-} -ArgumentList $TargetsCSV, $cred
+} -ArgumentList $TargetsCSV, $ExcludeCSV, $cred
 
 Write-Stage "Done."

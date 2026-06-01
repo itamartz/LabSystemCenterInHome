@@ -593,6 +593,7 @@ Built by (run from the host, in order):
 | `15-Install-SCOMAgents.ps1` | Push agent to all SCCM-side VMs | Yes — DSC-style Test→Set wrappers around `Install-SCOMAgent` |
 | `16-Import-WindowsServerOS-MP.ps1` | Extract + import the Server-OS MP family | Yes — DSC-style Test→Set wrappers around `msiexec` and `Import-SCOMManagementPack` |
 | `17-Install-SCOMConsole-B-SCOMMS.ps1` | SCOM 2025 Operations Console (co-located with MS) | Yes — DSC-style Test (exe + registry probe) → Set (`setup.exe /install /components:OMConsole`) |
+| `18-Import-RelevantMPs.ps1` | All MPs relevant to the SADAB environment (ADDS, ADCS, DNS, IIS, SQL, SSRS, WSUS, Defender) | Yes — per-family DSC-style Test (`Get-SCOMManagementPack` by name pattern) → Set (BITS download → msiexec extract → `Import-SCOMManagementPack`) |
 
 **Lab simplifications:** Action / DAS / DataReader / DataWriter accounts all run as
 `SADAB\Administrator` (single-account lab; in production these should be four separate
@@ -661,6 +662,63 @@ Server 2025 Datacenter" with HealthState `Success`.
 - **Batch import vs. one-by-one passes.** `Import-SCOMManagementPack -FullName <array>`
   lets SCOM resolve dependency order on its own; if the batch fails (typically due to
   a dependency timing issue) the script falls back to one-by-one with retry passes.
+
+## SCOM environment-relevant Management Packs (2026-06-01)
+
+`18-Import-RelevantMPs.ps1` downloads and imports the Microsoft management pack family that
+maps to every server role actually installed in SADAB. Re-runs are `[TEST PASS]` no-ops.
+
+| MP family | DL id | Component covered | Sub-MPs imported |
+|---|---|---|---|
+| Windows Server OS 2016+ | 54303 | Server 2025 base OS on all 8 VMs | 8 (incl. Server.Library, 2016.Discovery/Monitoring, NetworkDiscovery from SCOM media) |
+| AD DS 2016+ | 54525 | A-DC AD DS | 8 (`Microsoft.Windows.Server.AD.*`) |
+| AD CS 2016+ | 56671 | A-DC `SADAB-Root-CA` | 3 (`Microsoft.Windows.*CertificateServices.*`) |
+| DNS 2016+ | 54524 | A-DC DNS server | 3 (`Microsoft.Windows.DNSServer.*`) |
+| IIS 2016+ | 54445 | A-MPDP / A-SCCM / B-MPDP IIS | 2 (`Microsoft.Windows.InternetInformationServices.*`) |
+| SQL Server (any version) | 108512 | A-SQLSCCM + B-SQLSCOM (SQL 2019) | 9 (`Microsoft.SQLServer.Core/Windows/IS/Visualization`) |
+| SQL Reporting Services | 57381 | A-SCCM SSRS (SCCM RSP) | 4 (`Microsoft.SQLServer.ReportingServices.*`) |
+| WSUS 2016 | 54509 | A-MPDP WSUS | 1 (`Microsoft.Windows.Server.UpdateServices.2016`) |
+| Windows Defender | 54081 | Defender on all servers | 1 (`Microsoft.WindowsDefender`) |
+
+**Documented gaps (deliberately excluded):**
+- **SCCM Configuration Manager MP** — the legacy id=34709 page was removed from the
+  Microsoft Download Center (returns 404) and SCCM Current Branch 2509 doesn't ship a
+  SCOM MP either. The A-SCCM site server is still covered by the OS + IIS + SQL (CM_PR1
+  DB on A-SQLSCCM) + WSUS MPs above.
+- **MSDTC 2016+ MP** (id=54271) — the published MP file imports with `The requested
+  management pack is not valid` on SCOM 2025 (broken dependency for the 10.0.0.1 build),
+  and SADAB doesn't actually exercise distributed transactions (SCCM CB doesn't, SQL AG
+  doesn't). The MSDTC *service* still gets baseline state monitoring via the Windows
+  Server OS MP.
+
+**Gotchas (encoded in the script):**
+- **MS Download Center hides direct `download.microsoft.com` URLs from raw HTML** — the
+  pages emit URLs only via JavaScript-rendered React state. The script therefore
+  hardcodes URLs that were captured once via a JS-aware browser tool (legacyupdate.net
+  mirror for older MPs, MS Download Center via Chrome React-fiber walk for the newer
+  SQL/SSRS). If a URL goes stale, refresh it the same way (see the comment block at the
+  top of script 18) or drop the new MSI into `C:\HyperV-Lab-Local\MPs-Download\` on
+  B-SCOMMS manually; the script picks it up if the filename matches.
+- **MSI install dir name varies between MP versions, and some MPs (SQL 7.12, SSRS 7.8)
+  extract into a version subfolder** under the install root. The script doesn't snapshot
+  "new dirs since msiexec" — that's fragile when a prior partial run left dirs in place.
+  Instead each catalogue entry carries an `ExpectedDirName` substring that names the
+  install dir to look in, and `.mp/.mpb` collection recurses into subfolders.
+- **Test patterns must exactly match imported MP names** (PowerShell `-like` wildcards,
+  so use `.*` between segments but `.` is literal). Mismatches cause silent "RE-TEST
+  FAIL" + a needless re-import next run. Imported names live in
+  `Get-SCOMManagementPack | Sort Name`.
+- **Re-importing a same-version MP throws `The requested management pack is not valid`**
+  with inner message `Cannot import management pack [...] This version of the MP is
+  already imported in the database`. That's why Test-MpFamilyImported runs *first* —
+  but if the family's MP name doesn't match the patterns, Set fires and you'll see this
+  benign error. Fix the pattern, don't retry the import.
+
+Re-run / verify from the host (idempotent):
+```powershell
+. .\scripts\lib\Connect-LabHost.ps1
+Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\18-Import-RelevantMPs.ps1' }
+```
 
 ## Verifying Lab State (read-only — 2026-05-27)
 
