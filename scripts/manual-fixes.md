@@ -1291,3 +1291,64 @@ OperationsManagerDW). The original `06b-Install-SQL-B-SQLSCOM.ps1` only installe
    lab VM.
 3. Re-run the SCOM install — `OpsMgrSetupWizard.log` should now progress past the database
    validation stage.
+
+---
+
+## 2026-06-01: Ghost SSRS install on A-SQLSCCM raised SCOM noise after the SSRS MP imported
+
+**Symptom:** after importing the SQL Server Reporting Services MP (id=57381, script 18),
+SCOM raised a `Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.MemoryUsageOnServer`
+Warning **on A-SQLSCCM\SSRS** (in addition to the expected A-SCCM\SSRS). We never configured
+SSRS on A-SQLSCCM - the lab's RSP runs on A-SCCM with `ReportServer` DB on A-SQLSCCM.
+
+**Why:** A-SQLSCCM had a leftover SSRS install (version 16.0.9388.19190, file timestamps
+from 9/14/2025 - well before the current build), service set to `Stopped+Disabled`. The
+SSRS MP discovers any host with the `root\Microsoft\SqlServer\ReportServer` WMI namespace,
+even if the service isn't running and the MSReportServer_Instance class has no instances.
+
+**One-off cleanup** (don't re-bake this into a build script - the ghost was specific to
+this lab's history; a fresh rebuild won't have it):
+
+```powershell
+# 1. Quiet-uninstall SSRS via its package-cache bootstrap (exit 3010 = OK / reboot pending)
+Invoke-LabVM -VMName 'A-SQLSCCM' -UseDomainCredential -ScriptBlock {
+    $exe = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+        | Where-Object DisplayName -eq 'Microsoft SQL Server Reporting Services' `
+        | Select-Object -First 1).QuietUninstallString
+    & cmd /c $exe   # has /uninstall /quiet baked in
+}
+
+# 2. Force-remove the leftover WMI namespace so the SSRS MP's discovery returns nothing
+Invoke-LabVM -VMName 'A-SQLSCCM' -UseDomainCredential -ScriptBlock {
+    Get-WmiObject -Namespace 'root\Microsoft\SqlServer' -Class __NAMESPACE -Filter "Name='ReportServer'" |
+        Remove-WmiObject
+}
+
+# 3. Delete the cached A-SQLSCCM\SSRS class instance from SCOM via the SDK
+#    (the natural discovery cycle would do this after ~4-24h; this forces it immediately)
+Invoke-OnB-SCOMMS {
+    Import-Module OperationsManager
+    New-SCOMManagementGroupConnection -ComputerName 'B-SCOMMS.sadab.pri' | Out-Null
+    $inst = Get-SCOMClassInstance | Where-Object DisplayName -eq 'A-SQLSCCM\SSRS' | Select -First 1
+    $mg   = Get-SCOMManagementGroup
+    $disc = New-Object Microsoft.EnterpriseManagement.ConnectorFramework.IncrementalDiscoveryData
+    $disc.Remove($inst); $disc.Commit($mg)
+}
+
+# 4. Close any residual rule-based alerts (ResolutionState != 255) - rule alerts can
+#    be force-closed once the rule's source no longer exists
+Set-SCOMAlert -Alert (Get-SCOMAlert | Where-Object ResolutionState -ne 255) `
+              -ResolutionState 255 -Comment 'ghost SSRS cleanup' -ErrorAction Stop
+```
+
+**SDK gotchas encountered:**
+- `Get-SCOMOverride -ManagementPack <mp>` does NOT exist in SCOM 2025 (parameter binding
+  error). Use the MP object's `.GetOverrides()` method instead. Script 21
+  (`21-Apply-SADABOverrides.ps1`) was updated to use this pattern.
+- The `IncrementalDiscoveryData` class is loaded by `Import-Module OperationsManager` -
+  no manual `Add-Type` needed (and the path I first tried,
+  `...\Powershell\OperationsManager\Microsoft.EnterpriseManagement.Core.dll`, doesn't
+  exist - that DLL is in the GAC and loaded by the PS module).
+- Set-SCOMAlert needs `-ErrorAction Stop` to surface refusals reliably; `-ErrorAction
+  SilentlyContinue` swallows the "monitor still unhealthy" error so the close looks like
+  it succeeded but didn't.

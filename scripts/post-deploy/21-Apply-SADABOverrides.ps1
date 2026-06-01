@@ -24,8 +24,13 @@
 
     | Source MP                       | Monitor disabled (FQN)                                                              | Why noise in lab        |
     |---------------------------------|-------------------------------------------------------------------------------------|-------------------------|
-    | Microsoft.WindowsDefender       | Microsoft.WindowsDefender.ProtectedServer.AntimalwareScan.Monitor                   | Lab Defender never runs a scheduled scan; monitor stays Unhealthy and re-raises Warning on every poll. |
-    | Microsoft.Windows.Server.AD.2016.Discovery | Microsoft.Windows.Server.2016.AD.Configuration.NetworkAdapters.DNS.Monitor | A-DC's NIC points DNS at itself / loopback; monitor flags this even though it's the intended DC config. |
+    | Microsoft.SQLServer.ReportingServices | Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.MemoryUsageOnServer | Lab A-SCCM runs SCCM + SSRS + console on one ~4.6 GB VM. The MP's "non-SSRS processes consume too much memory" threshold is unrealistic for a single-VM lab; can't be fixed by adding RAM (host is RAM-constrained). |
+
+    The Defender and AD-DS-NetworkAdapters monitors that used to be in this
+    catalogue have been REMOVED - their root causes are fixed by script
+    22-Fix-SCOMAlertRootCauses.ps1 (daily QuickScan + correct DC DNS).
+    Keeping override-and-fix in lockstep avoids "monitor disabled even though
+    it would now be Healthy" drift.
 
     The override creates a *class-level disable* (Enabled = false) on the
     monitor, which silences it for every targeted instance.
@@ -94,9 +99,9 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
         param([string]$MonitorName, [string]$MpName)
         $mp = Get-SCOMManagementPack -Name $MpName -ErrorAction SilentlyContinue
         if (-not $mp) { return $false }
-        # Any existing override in this MP whose target is the named monitor
-        # and that sets Enabled = false counts as compliant.
-        $ovs = Get-SCOMOverride -ManagementPack $mp -ErrorAction SilentlyContinue
+        # Get-SCOMOverride doesn't accept -ManagementPack in SCOM 2025;
+        # use the SDK's GetOverrides() method on the MP object directly.
+        $ovs = $mp.GetOverrides()
         if (-not $ovs) { return $false }
         [bool]($ovs | Where-Object {
             $_.Monitor -and
@@ -116,16 +121,10 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
     # -------- catalogue --------
     $catalogue = @(
         [PSCustomObject]@{
-            OverrideMp   = 'SADAB_WindowsDefender_Overrides'
-            DisplayName  = 'SADAB Windows Defender Overrides'
-            Description  = 'Lab overrides for Microsoft.WindowsDefender. Disables noise monitors that flag missing Defender scans in a lab where no scan schedule is configured.'
-            MonitorNames = @('Microsoft.WindowsDefender.ProtectedServer.AntimalwareScan.Monitor')
-        }
-        [PSCustomObject]@{
-            OverrideMp   = 'SADAB_AD_DS_2016_Overrides'
-            DisplayName  = 'SADAB AD DS 2016 Overrides'
-            Description  = 'Lab overrides for Microsoft.Windows.Server.AD.2016. Disables the NetworkAdapters DNS monitor that flags the DC pointing its own NIC DNS at loopback (intended DC configuration).'
-            MonitorNames = @('Microsoft.Windows.Server.2016.AD.Configuration.NetworkAdapters.DNS.Monitor')
+            OverrideMp   = 'SADAB_SSRS_Overrides'
+            DisplayName  = 'SADAB SQL Server Reporting Services Overrides'
+            Description  = 'Lab overrides for Microsoft.SQLServer.ReportingServices. Disables the MemoryUsageOnServer monitor that flags "non-SSRS processes use too much memory" - unavoidable on the single-VM lab A-SCCM that hosts SCCM + SSRS + Console with limited RAM.'
+            MonitorNames = @('Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.MemoryUsageOnServer')
         }
     )
 
@@ -175,7 +174,7 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
     $sadabMps = Get-SCOMManagementPack | Where-Object { $_.Name -like 'SADAB_*_Overrides' }
     foreach ($mp in $sadabMps) {
         Write-Host ("--- {0} ---" -f $mp.Name)
-        Get-SCOMOverride -ManagementPack $mp -ErrorAction SilentlyContinue |
+        $mp.GetOverrides() |
             Select-Object @{N='Monitor';E={if($_.Monitor){$_.Monitor.GetElement().Name}}}, Property, Value |
             Format-Table -AutoSize | Out-String | Write-Host
     }
