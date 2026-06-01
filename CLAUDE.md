@@ -592,6 +592,7 @@ Built by (run from the host, in order):
 | `13b-Install-SCOM-B-SCOMMS.ps1` | SCOM 2025 MS via setup.exe | one-shot bootstrap (documented exception) |
 | `15-Install-SCOMAgents.ps1` | Push agent to all SCCM-side VMs | Yes — DSC-style Test→Set wrappers around `Install-SCOMAgent` |
 | `16-Import-WindowsServerOS-MP.ps1` | Extract + import the Server-OS MP family | Yes — DSC-style Test→Set wrappers around `msiexec` and `Import-SCOMManagementPack` |
+| `17-Install-SCOMConsole-B-SCOMMS.ps1` | SCOM 2025 Operations Console (co-located with MS) | Yes — DSC-style Test (exe + registry probe) → Set (`setup.exe /install /components:OMConsole`) |
 
 **Lab simplifications:** Action / DAS / DataReader / DataWriter accounts all run as
 `SADAB\Administrator` (single-account lab; in production these should be four separate
