@@ -95,36 +95,57 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
         Set-Content -Path $xmlPath -Value $xml -Encoding UTF8
         Import-SCOMManagementPack -FullName $xmlPath -ErrorAction Stop
     }
-    function Test-MonitorDisabledInMp {
-        param([string]$MonitorName, [string]$MpName)
+    function Test-MonitorOverrideInMp {
+        param(
+            [string]$MonitorName,
+            [string]$MpName,
+            [ValidateSet('Enable','Disable')] [string]$Action
+        )
         $mp = Get-SCOMManagementPack -Name $MpName -ErrorAction SilentlyContinue
         if (-not $mp) { return $false }
         # Get-SCOMOverride doesn't accept -ManagementPack in SCOM 2025;
         # use the SDK's GetOverrides() method on the MP object directly.
         $ovs = $mp.GetOverrides()
         if (-not $ovs) { return $false }
+        $wantValue = if ($Action -eq 'Enable') { 'true' } else { 'false' }
         [bool]($ovs | Where-Object {
             $_.Monitor -and
             $_.Monitor.GetElement().Name -eq $MonitorName -and
             $_.Property -eq 'Enabled' -and
-            ([string]$_.Value -eq 'false' -or [string]$_.Value -eq 'False')
+            ([string]$_.Value).ToLower() -eq $wantValue
         })
     }
-    function Set-MonitorDisabledInMp {
-        param([string]$MonitorName, [string]$MpName)
+    function Set-MonitorOverrideInMp {
+        param(
+            [string]$MonitorName,
+            [string]$MpName,
+            [ValidateSet('Enable','Disable')] [string]$Action
+        )
         $mp = Get-SCOMManagementPack -Name $MpName
         $monitor = Get-SCOMMonitor -Name $MonitorName -ErrorAction Stop
         if (-not $monitor) { throw "Monitor not found: $MonitorName" }
-        Disable-SCOMMonitor -Monitor $monitor -ManagementPack $mp -ErrorAction Stop
+        if ($Action -eq 'Enable') {
+            Enable-SCOMMonitor -Monitor $monitor -ManagementPack $mp -ErrorAction Stop
+        } else {
+            Disable-SCOMMonitor -Monitor $monitor -ManagementPack $mp -ErrorAction Stop
+        }
     }
 
     # -------- catalogue --------
     $catalogue = @(
         [PSCustomObject]@{
-            OverrideMp   = 'SADAB_SSRS_Overrides'
-            DisplayName  = 'SADAB SQL Server Reporting Services Overrides'
-            Description  = 'Lab overrides for Microsoft.SQLServer.ReportingServices. Disables the MemoryUsageOnServer monitor that flags "non-SSRS processes use too much memory" - unavoidable on the single-VM lab A-SCCM that hosts SCCM + SSRS + Console with limited RAM.'
-            MonitorNames = @('Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.MemoryUsageOnServer')
+            OverrideMp      = 'SADAB_SSRS_Overrides'
+            DisplayName     = 'SADAB SQL Server Reporting Services Overrides'
+            Description     = 'Lab overrides for Microsoft.SQLServer.ReportingServices. Disables the MemoryUsageOnServer monitor that flags "non-SSRS processes use too much memory" - unavoidable on the single-VM lab A-SCCM that hosts SCCM + SSRS + Console with limited RAM.'
+            DisableMonitors = @('Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.MemoryUsageOnServer')
+            EnableMonitors  = @()
+        }
+        [PSCustomObject]@{
+            OverrideMp      = 'SADAB_MCM_Overrides'
+            DisplayName     = 'SADAB MCM (Microsoft Configuration Manager) Overrides'
+            Description     = 'Lab overrides for the MCM (Kevin Holman) MP. Enables the CcmExec service monitor that ships disabled by default in v5.0.2303.2 - we want this on so the 4+ discovered clients flip from Uninitialized/Not Monitored to a real health state.'
+            DisableMonitors = @()
+            EnableMonitors  = @('MECM.Client.CcmExec.Service.Monitor')
         }
     )
 
@@ -144,15 +165,19 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
             }
         }
 
-        # Step 2: ensure each named monitor is disabled in this MP
-        foreach ($mName in $entry.MonitorNames) {
-            if (Test-MonitorDisabledInMp -MonitorName $mName -MpName $entry.OverrideMp) {
-                Write-Host ("  [TEST PASS] monitor disabled: {0}" -f $mName)
+        # Step 2: for each Enable + Disable entry, Test->Set the override
+        $work = @()
+        foreach ($n in @($entry.DisableMonitors)) { if ($n) { $work += [PSCustomObject]@{ Action='Disable'; Name=$n } } }
+        foreach ($n in @($entry.EnableMonitors))  { if ($n) { $work += [PSCustomObject]@{ Action='Enable';  Name=$n } } }
+        foreach ($w in $work) {
+            $act = $w.Action; $mName = $w.Name
+            if (Test-MonitorOverrideInMp -MonitorName $mName -MpName $entry.OverrideMp -Action $act) {
+                Write-Host ("  [TEST PASS] {0,-7} {1}" -f $act, $mName)
             } else {
-                Write-Host ("  [SET]       disabling monitor: {0}" -f $mName)
+                Write-Host ("  [SET]       {0,-7} {1}" -f $act, $mName)
                 try {
-                    Set-MonitorDisabledInMp -MonitorName $mName -MpName $entry.OverrideMp
-                    if (Test-MonitorDisabledInMp -MonitorName $mName -MpName $entry.OverrideMp) {
+                    Set-MonitorOverrideInMp -MonitorName $mName -MpName $entry.OverrideMp -Action $act
+                    if (Test-MonitorOverrideInMp -MonitorName $mName -MpName $entry.OverrideMp -Action $act) {
                         Write-Host ("  [RE-TEST]   PASS")
                     } else {
                         Write-Host ("  [RE-TEST]   FAIL - override didn't land in {0}" -f $entry.OverrideMp) -ForegroundColor Yellow

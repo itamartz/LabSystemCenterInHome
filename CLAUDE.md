@@ -725,6 +725,48 @@ Re-run / verify from the host (idempotent):
 Invoke-LabHost { & 'C:\HyperV-Lab\scripts\post-deploy\18-Import-RelevantMPs.ps1' }
 ```
 
+## SADAB AD OU layout (load-bearing for SCCM/SCOM scoping)
+
+The lab uses these OUs under `OU=SADAB,DC=sadab,DC=pri`:
+
+| OU | What goes here |
+|---|---|
+| `OU=Servers` | Server computer objects only (A-DFSR, A-MPDP, A-SCCM, A-SQLSCCM, B-MPDP, B-SCOMMS, B-SQLSCOM). DCs stay in built-in `OU=Domain Controllers` and are deliberately NOT in here. |
+| `OU=Endpoints` | Workstation computer objects only. **Do NOT put servers here, even if it "works" for discovery.** Misplaced servers get classified with empty `ClientType` by SCCM, which breaks the "auto push to servers" Client Push rule and any server-scoped collection memberships. |
+| `OU=Users` | User accounts |
+| `OU=Groups` | Security groups (`SADAB_Role_*` pattern) |
+
+SCCM AD System Discovery scope is **both** `OU=Servers` + `OU=Endpoints` (recursive), so a misfiled object still gets discovered — it just gets the wrong classification. Move objects to the correct OU before running discoveries.
+
+## SCCM cross-site client coverage — BG-Site-B fallback to A-MPDP (2026-06-02)
+
+When pushing the SCCM client to the 3 Site-B domain-joined servers (B-MPDP /
+B-SCOMMS / B-SQLSCOM), ccmsetup.log on each one returned
+`Failed to get DP locations as the expected version from MP 'HTTPS://A-MPDP.sadab.pri'. Error 0x87d00215`
+and the install retried every 10 minutes without making progress.
+
+**Why:** the client's IP put it in `BG-Site-B` (10.20.0.1–254), but `BG-Site-B`
+had no site systems assigned — only `BG-Site-A` had A-MPDP. The
+ContentLocationReply returned `<LocationRecords/>` empty and the install
+couldn't find a DP to download the client payload from.
+
+**Fix** (one-off, encoded as a manual step in `manual-fixes.md`):
+
+```powershell
+Set-CMBoundaryGroup -Name 'BG-Site-B' -AddSiteSystemServerName 'A-MPDP.sadab.pri'
+# then re-trigger Install-CMClient for the 3 B-side servers; ccmsetup picks it up next retry
+```
+
+Once A-MPDP was added to BG-Site-B, the next ccmsetup retry got a valid DP
+list (LocationRecords populated with A-MPDP HTTPS), downloaded the client
+package, and finished installing. After CcmExec started on each B-side VM the
+MCM MP discovery picked them up and the `MECM.Client` instances populated
+(was 4, now 7).
+
+This is a Phase-2 lab artifact: in production we'd put Site B's own MP/DP on
+B-MPDP and add it as the local site system for BG-Site-B; until then,
+A-MPDP serves both boundary groups.
+
 ## MCM (SCCM) Management Pack — Kevin Holman community MP (2026-06-01)
 
 The Microsoft-shipped SCCM MP for SCOM was deleted from the Download Center
