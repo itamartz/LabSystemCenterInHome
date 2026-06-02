@@ -35,7 +35,7 @@ INSTANCEID="MSSQLSERVER"
 SQLCOLLATION="SQL_Latin1_General_CP1_CI_AS"
 SQLSVCACCOUNT="NT AUTHORITY\SYSTEM"
 AGTSVCACCOUNT="NT AUTHORITY\SYSTEM"
-SQLSYSADMINACCOUNTS="SADAB\Administrator" "SADAB\Domain Admins"
+SQLSYSADMINACCOUNTS="SADAB\Administrator" "SADAB\Domain Admins" "NT AUTHORITY\SYSTEM"
 SQLTEMPDBFILECOUNT=2
 SQLTEMPDBFILESIZE=32
 SQLSVCINSTANTFILEINIT="True"
@@ -190,7 +190,32 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
     Set-Service -Name MSSQLSERVER       -StartupType Automatic
     Set-Service -Name SQLSERVERAGENT    -StartupType Automatic
     Restart-Service -Name MSSQLSERVER -Force
-    Start-Service   -Name SQLSERVERAGENT -ErrorAction SilentlyContinue
+    # SQLSERVERAGENT stops when MSSQLSERVER restarts (dependency); explicitly
+    # restart it AFTER the engine is back up. -ErrorAction Stop so a failure
+    # surfaces - previously SilentlyContinue masked a real "agent never
+    # started" state and SCOM later raised SQL Agent Stopped alert.
+    Start-Service   -Name SQLSERVERAGENT -ErrorAction Stop
+
+    # SCOM SQL MP on the agent (running as LocalSystem) needs sysadmin to
+    # query securables. Without this, SCOM raises:
+    #   "MSSQL on Windows: Some Database Engine securables are inaccessible".
+    # The config file's SQLSYSADMINACCOUNTS already includes "NT AUTHORITY\SYSTEM"
+    # for clean installs; this idempotent T-SQL fixes any pre-existing instance
+    # that was installed before this change.
+    $sysAdminCheck = Invoke-Sqlcmd -ServerInstance localhost -Query @"
+SELECT COUNT(*) AS HasIt FROM sys.server_role_members rm
+JOIN sys.server_principals p ON rm.member_principal_id = p.principal_id
+JOIN sys.server_principals r ON rm.role_principal_id = r.principal_id
+WHERE r.name = 'sysadmin' AND p.name = 'NT AUTHORITY\SYSTEM'
+"@ -ErrorAction SilentlyContinue
+    if (-not $sysAdminCheck -or $sysAdminCheck.HasIt -eq 0) {
+        Write-Host "Granting NT AUTHORITY\SYSTEM sysadmin (for SCOM agent)..."
+        Invoke-Sqlcmd -ServerInstance localhost -Query @"
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name='NT AUTHORITY\SYSTEM')
+    CREATE LOGIN [NT AUTHORITY\SYSTEM] FROM WINDOWS;
+EXEC sp_addsrvrolemember 'NT AUTHORITY\SYSTEM','sysadmin';
+"@ -ErrorAction Stop
+    }
 
     Write-Host "SQL Server 2019 + CU installed on $env:COMPUTERNAME (data on D:)."
 } -ArgumentList $MediaShare, $SqlConfigSCOM, $DomainAdminPassword
