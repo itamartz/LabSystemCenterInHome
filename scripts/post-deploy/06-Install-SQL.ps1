@@ -268,9 +268,34 @@ function Install-SQLOnVM {
         Set-Service -Name 'SQLSERVERAGENT' -StartupType Automatic
         Start-Service -Name 'SQLSERVERAGENT' -ErrorAction SilentlyContinue
 
-        # Restart SQL to apply protocol changes
+        # Restart SQL to apply protocol changes. SQLSERVERAGENT depends on
+        # MSSQLSERVER so it stops too - explicitly start it back AND surface
+        # any failure (-ErrorAction Stop). Previously SilentlyContinue masked
+        # the failure and SCOM later raised "SQL Server Agent Stopped".
         Restart-Service -Name 'MSSQLSERVER' -Force
-        Start-Service -Name 'SQLSERVERAGENT' -ErrorAction SilentlyContinue
+        Start-Service -Name 'SQLSERVERAGENT' -ErrorAction Stop
+
+        # SCOM SQL MP runs on the agent as LocalSystem and needs sysadmin on
+        # SQL to query securables - otherwise it raises "Some Database Engine
+        # securables are inaccessible" and the host doesn't show up in the
+        # SQL Server / SQL Agent views in the SCOM Console. The
+        # SQLSYSADMINACCOUNTS in the .ini above includes NT AUTHORITY\SYSTEM
+        # for clean rebuilds; this idempotent T-SQL block fixes any existing
+        # instance that was installed before this change.
+        $hasSystem = Invoke-Sqlcmd -ServerInstance localhost -Query @"
+SELECT COUNT(*) AS HasIt FROM sys.server_role_members rm
+JOIN sys.server_principals p ON rm.member_principal_id = p.principal_id
+JOIN sys.server_principals r ON rm.role_principal_id = r.principal_id
+WHERE r.name = 'sysadmin' AND p.name = 'NT AUTHORITY\SYSTEM'
+"@ -ErrorAction SilentlyContinue
+        if (-not $hasSystem -or $hasSystem.HasIt -eq 0) {
+            Write-Host "Granting NT AUTHORITY\SYSTEM sysadmin (for SCOM agent)..."
+            Invoke-Sqlcmd -ServerInstance localhost -Query @"
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name='NT AUTHORITY\SYSTEM')
+    CREATE LOGIN [NT AUTHORITY\SYSTEM] FROM WINDOWS;
+EXEC sp_addsrvrolemember 'NT AUTHORITY\SYSTEM','sysadmin';
+"@ -ErrorAction Stop
+        }
 
         Write-Host "SQL Server 2019 installed and configured."
 
