@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
     Downloads and imports every management pack that's relevant to the SADAB
-    lab environment (AD DS, AD CS, DNS, SQL Server, SSRS, IIS, WSUS, MSDTC,
-    Windows Defender). The Windows Server OS MP family (script 16) is the
-    prerequisite for almost every one of these.
+    lab environment (AD DS, AD CS, DNS, SQL Server, SSRS, IIS, WSUS).
+    The Windows Server OS MP family (script 16) is the prerequisite for
+    almost every one of these.
 
 .NOTES
     Must run ON HOST B (uses Hyper-V direct PowerShell to B-SCOMMS).
@@ -216,14 +216,17 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
         #   avoids a documented import error in every run.
         # - The MSDTC *service* still gets baseline service-state monitoring
         #   via the Windows Server OS MP.
-        [PSCustomObject]@{
-            Slug            = 'Defender'
-            DownloadUrl     = 'https://download.microsoft.com/download/A/1/3/A1395129-1E4D-4332-AB15-665371C9E40C/System Center 2016 Management Pack for Windows Defender.msi'
-            MsiTargetName   = 'SCMP-Defender.msi'
-            ExpectedDirName = 'Windows Defender'
-            NamePatterns    = @('Microsoft.WindowsDefender', 'Microsoft.WindowsDefender.*', 'Microsoft.Antimalware*')
-            Reason          = 'Windows Defender on all servers'
-        }
+        # Defender MP (id=54081) intentionally NOT in the catalogue:
+        # - The lab doesn't run anything where SCOM monitoring of Defender
+        #   adds value over the Defender service's built-in real-time
+        #   protection.
+        # - The MP's "no recent scan" Warning was high-noise (every server
+        #   on every monitor cycle until a scan completed).
+        # - Script 22 still schedules a daily Defender quick scan on each
+        #   VM as basic Windows hygiene; that scheduling is independent of
+        #   SCOM monitoring and continues to work.
+        # If you want Defender back under SCOM monitoring, re-add an entry
+        # here pointing at id=54081 (URL captured 2026-06-01).
     )
 
     foreach ($mp in $mpCatalog) {
@@ -249,7 +252,7 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
     Write-Host "`n=== Imported MP families (summary) ===" -ForegroundColor Cyan
     Get-SCOMManagementPack |
         Where-Object {
-            $_.Name -match 'Windows\.Server\.(AD|UpdateServices)|CertificateServices|DNSServer|SQLServer|InternetInformationServices|WindowsDefender|Antimalware'
+            $_.Name -match 'Windows\.Server\.(AD|UpdateServices)|CertificateServices|DNSServer|SQLServer|InternetInformationServices'
         } |
         Sort-Object Name |
         Select-Object Name, Version, Sealed |
