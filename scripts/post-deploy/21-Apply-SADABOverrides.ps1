@@ -95,6 +95,45 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
         Set-Content -Path $xmlPath -Value $xml -Encoding UTF8
         Import-SCOMManagementPack -FullName $xmlPath -ErrorAction Stop
     }
+    function Test-RecoveryOverrideInMp {
+        param(
+            [string]$RecoveryName,
+            [string]$MpName,
+            [ValidateSet('Enable','Disable')] [string]$Action
+        )
+        $mp = Get-SCOMManagementPack -Name $MpName -ErrorAction SilentlyContinue
+        if (-not $mp) { return $false }
+        $wantValue = if ($Action -eq 'Enable') { 'true' } else { 'false' }
+        [bool]($mp.GetOverrides() | Where-Object {
+            $_.Recovery -and
+            $_.Recovery.GetElement().Name -eq $RecoveryName -and
+            $_.Property -eq 'Enabled' -and
+            ([string]$_.Value).ToLower() -eq $wantValue
+        })
+    }
+    function Set-RecoveryOverrideInMp {
+        param(
+            [string]$RecoveryName,
+            [string]$MpName,
+            [ValidateSet('Enable','Disable')] [string]$Action
+        )
+        # SCOM 2025 has no Enable-SCOMRecovery cmdlet, so author the override
+        # via the SDK directly: ManagementPackRecoveryPropertyOverride targets
+        # a recovery, sets the Enabled property to 'true'/'false', AcceptChanges
+        # persists the unsealed MP back to the management group.
+        $mp = Get-SCOMManagementPack -Name $MpName
+        $recovery = Get-SCOMRecovery -Name $RecoveryName -ErrorAction Stop
+        if (-not $recovery) { throw "Recovery not found: $RecoveryName" }
+        $value = if ($Action -eq 'Enable') { 'true' } else { 'false' }
+        $overrideId = "OverrideForRecovery_$($RecoveryName -replace '[^A-Za-z0-9]','')_$Action"
+        $ov = New-Object Microsoft.EnterpriseManagement.Configuration.ManagementPackRecoveryPropertyOverride($mp, $overrideId)
+        $ov.Recovery   = $recovery
+        $ov.Property   = 'Enabled'
+        $ov.Value      = $value
+        $ov.Context    = $recovery.Target
+        $ov.DisplayName = "SADAB $Action recovery $RecoveryName"
+        $mp.AcceptChanges()
+    }
     function Test-MonitorOverrideInMp {
         param(
             [string]$MonitorName,
@@ -134,18 +173,22 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
     # -------- catalogue --------
     $catalogue = @(
         [PSCustomObject]@{
-            OverrideMp      = 'SADAB_SSRS_Overrides'
-            DisplayName     = 'SADAB SQL Server Reporting Services Overrides'
-            Description     = 'Lab overrides for Microsoft.SQLServer.ReportingServices. Disables the MemoryUsageOnServer monitor that flags "non-SSRS processes use too much memory" - unavoidable on the single-VM lab A-SCCM that hosts SCCM + SSRS + Console with limited RAM.'
-            DisableMonitors = @('Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.MemoryUsageOnServer')
-            EnableMonitors  = @()
+            OverrideMp        = 'SADAB_SSRS_Overrides'
+            DisplayName       = 'SADAB SQL Server Reporting Services Overrides'
+            Description       = 'Lab overrides for Microsoft.SQLServer.ReportingServices. Disables the MemoryUsageOnServer monitor that flags "non-SSRS processes use too much memory" - unavoidable on the single-VM lab A-SCCM that hosts SCCM + SSRS + Console with limited RAM.'
+            DisableMonitors   = @('Microsoft.SQLServer.ReportingServices.Windows.Monitor.Instance.MemoryUsageOnServer')
+            EnableMonitors    = @()
+            DisableRecoveries = @()
+            EnableRecoveries  = @()
         }
         [PSCustomObject]@{
-            OverrideMp      = 'SADAB_MCM_Overrides'
-            DisplayName     = 'SADAB MCM (Microsoft Configuration Manager) Overrides'
-            Description     = 'Lab overrides for the MCM (Kevin Holman) MP. Enables the CcmExec service monitor that ships disabled by default in v5.0.2303.2 - we want this on so the 4+ discovered clients flip from Uninitialized/Not Monitored to a real health state.'
-            DisableMonitors = @()
-            EnableMonitors  = @('MECM.Client.CcmExec.Service.Monitor')
+            OverrideMp        = 'SADAB_MCM_Overrides'
+            DisplayName       = 'SADAB MCM (Microsoft Configuration Manager) Overrides'
+            Description       = 'Lab overrides for the MCM (Kevin Holman) MP. Enables the CcmExec service monitor and its companion recovery - both ship disabled in v5.0.2303.2.'
+            DisableMonitors   = @()
+            EnableMonitors    = @('MECM.Client.CcmExec.Service.Monitor')
+            DisableRecoveries = @()
+            EnableRecoveries  = @('MECM.Client.CcmExec.Service.Recovery')
         }
     )
 
@@ -165,19 +208,25 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
             }
         }
 
-        # Step 2: for each Enable + Disable entry, Test->Set the override
+        # Step 2: for each Enable + Disable (monitor + recovery) entry, Test->Set
         $work = @()
-        foreach ($n in @($entry.DisableMonitors)) { if ($n) { $work += [PSCustomObject]@{ Action='Disable'; Name=$n } } }
-        foreach ($n in @($entry.EnableMonitors))  { if ($n) { $work += [PSCustomObject]@{ Action='Enable';  Name=$n } } }
+        foreach ($n in @($entry.DisableMonitors))   { if ($n) { $work += [PSCustomObject]@{ Kind='Monitor';  Action='Disable'; Name=$n } } }
+        foreach ($n in @($entry.EnableMonitors))    { if ($n) { $work += [PSCustomObject]@{ Kind='Monitor';  Action='Enable';  Name=$n } } }
+        foreach ($n in @($entry.DisableRecoveries)) { if ($n) { $work += [PSCustomObject]@{ Kind='Recovery'; Action='Disable'; Name=$n } } }
+        foreach ($n in @($entry.EnableRecoveries))  { if ($n) { $work += [PSCustomObject]@{ Kind='Recovery'; Action='Enable';  Name=$n } } }
         foreach ($w in $work) {
-            $act = $w.Action; $mName = $w.Name
-            if (Test-MonitorOverrideInMp -MonitorName $mName -MpName $entry.OverrideMp -Action $act) {
-                Write-Host ("  [TEST PASS] {0,-7} {1}" -f $act, $mName)
+            $act = $w.Action; $name = $w.Name; $kind = $w.Kind
+            $testFn = if ($kind -eq 'Monitor') { 'Test-MonitorOverrideInMp' } else { 'Test-RecoveryOverrideInMp' }
+            $setFn  = if ($kind -eq 'Monitor') { 'Set-MonitorOverrideInMp'  } else { 'Set-RecoveryOverrideInMp'  }
+            $nameParam = if ($kind -eq 'Monitor') { 'MonitorName' } else { 'RecoveryName' }
+            $testArgs = @{ $nameParam = $name; MpName = $entry.OverrideMp; Action = $act }
+            if (& $testFn @testArgs) {
+                Write-Host ("  [TEST PASS] {0,-8} {1,-7} {2}" -f $kind, $act, $name)
             } else {
-                Write-Host ("  [SET]       {0,-7} {1}" -f $act, $mName)
+                Write-Host ("  [SET]       {0,-8} {1,-7} {2}" -f $kind, $act, $name)
                 try {
-                    Set-MonitorOverrideInMp -MonitorName $mName -MpName $entry.OverrideMp -Action $act
-                    if (Test-MonitorOverrideInMp -MonitorName $mName -MpName $entry.OverrideMp -Action $act) {
+                    & $setFn @testArgs
+                    if (& $testFn @testArgs) {
                         Write-Host ("  [RE-TEST]   PASS")
                     } else {
                         Write-Host ("  [RE-TEST]   FAIL - override didn't land in {0}" -f $entry.OverrideMp) -ForegroundColor Yellow
@@ -200,8 +249,12 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
     foreach ($mp in $sadabMps) {
         Write-Host ("--- {0} ---" -f $mp.Name)
         $mp.GetOverrides() |
-            Select-Object @{N='Monitor';E={if($_.Monitor){$_.Monitor.GetElement().Name}}}, Property, Value |
-            Format-Table -AutoSize | Out-String | Write-Host
+            Select-Object @{N='Workflow';E={
+                if ($_.Monitor)  { 'Monitor:  ' + $_.Monitor.GetElement().Name }
+                elseif ($_.Recovery) { 'Recovery: ' + $_.Recovery.GetElement().Name }
+                elseif ($_.Rule) { 'Rule:     ' + $_.Rule.GetElement().Name }
+            }}, Property, Value |
+            Format-Table -AutoSize | Out-String -Width 220 | Write-Host
     }
 }
 
